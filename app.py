@@ -201,6 +201,73 @@ def migrar_banco():
     conn.close()
 
 # ====================================================================
+# FUNÇÕES DE EDIÇÃO
+# ====================================================================
+def editar_cliente(cliente_id, dados_atualizados):
+    """Edita os dados de um cliente (exceto valor financeiro)"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    c.execute('''
+        UPDATE clientes SET
+            nome = ?,
+            telefone = ?,
+            cpf = ?,
+            rg = ?,
+            data_nascimento = ?,
+            email = ?,
+            celular = ?,
+            logradouro = ?,
+            numero = ?,
+            complemento = ?,
+            bairro = ?,
+            cidade = ?,
+            estado = ?,
+            cep = ?,
+            observacoes = ?
+        WHERE id = ?
+    ''', (
+        dados_atualizados['nome'],
+        dados_atualizados['telefone'],
+        dados_atualizados['cpf'],
+        dados_atualizados['rg'],
+        dados_atualizados['data_nascimento'],
+        dados_atualizados['email'],
+        dados_atualizados['celular'],
+        dados_atualizados['logradouro'],
+        dados_atualizados['numero'],
+        dados_atualizados['complemento'],
+        dados_atualizados['bairro'],
+        dados_atualizados['cidade'],
+        dados_atualizados['estado'],
+        dados_atualizados['cep'],
+        dados_atualizados['observacoes'],
+        cliente_id
+    ))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+def editar_produto_padrao(produto_id, novo_nome):
+    """Edita o nome de um produto padrão (valor NÃO pode ser alterado)"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    c.execute("SELECT id FROM produtos_padrao WHERE id = ?", (produto_id,))
+    if not c.fetchone():
+        conn.close()
+        return False
+    
+    c.execute('''
+        UPDATE produtos_padrao SET nome = ? WHERE id = ?
+    ''', (novo_nome, produto_id))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+# ====================================================================
 # FUNÇÕES DE SINCRONIZAÇÃO
 # ====================================================================
 def exportar_dados_json():
@@ -602,6 +669,100 @@ elif menu == "👤 Clientes":
             use_container_width=True
         )
         
+        # ========== EDIÇÃO DE CLIENTE ==========
+        st.divider()
+        st.subheader("✏️ Editar Cliente")
+        st.caption("Edite os dados do cliente sem precisar apagar e recriar")
+        
+        cliente_editar = st.selectbox(
+            "Selecione o cliente para editar",
+            [c['id'] for c in clientes],
+            format_func=lambda x: next(c['nome'] for c in clientes if c['id'] == x),
+            key="editar_cliente"
+        )
+        
+        if cliente_editar:
+            cliente_dados = query_to_dict("SELECT * FROM clientes WHERE id = ?", (cliente_editar,))
+            
+            if cliente_dados:
+                st.info(f"✏️ Editando: **{cliente_dados['nome']}**")
+                
+                with st.expander("📝 Editar Dados do Cliente", expanded=True):
+                    with st.form("form_editar_cliente"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            nome_edit = st.text_input("Nome*", value=cliente_dados['nome'] or '')
+                            telefone_edit = st.text_input("Telefone*", value=cliente_dados['telefone'] or '')
+                            cpf_edit = st.text_input("CPF", max_chars=11, value=cliente_dados['cpf'] or '')
+                            rg_edit = st.text_input("RG", value=cliente_dados['rg'] or '')
+                        with col2:
+                            data_nasc_edit = st.date_input(
+                                "Data de Nascimento",
+                                value=datetime.strptime(cliente_dados['data_nascimento'], "%Y-%m-%d").date() if cliente_dados['data_nascimento'] else None
+                            )
+                            email_edit = st.text_input("Email", value=cliente_dados['email'] or '')
+                            celular_edit = st.text_input("Celular", value=cliente_dados['celular'] or '')
+                        
+                        st.subheader("📍 Endereço")
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        with col1:
+                            logradouro_edit = st.text_input("Logradouro", value=cliente_dados['logradouro'] or '')
+                        with col2:
+                            numero_edit = st.text_input("Número", value=cliente_dados['numero'] or '')
+                        with col3:
+                            complemento_edit = st.text_input("Complemento", value=cliente_dados['complemento'] or '')
+                        
+                        col1, col2, col3 = st.columns([2, 2, 1])
+                        with col1:
+                            bairro_edit = st.text_input("Bairro", value=cliente_dados['bairro'] or '')
+                        with col2:
+                            cidade_edit = st.text_input("Cidade", value=cliente_dados['cidade'] or '')
+                        with col3:
+                            estado_edit = st.text_input("UF", max_chars=2, value=cliente_dados['estado'] or '')
+                        
+                        cep_edit = st.text_input("CEP", max_chars=8, value=cliente_dados['cep'] or '')
+                        observacoes_edit = st.text_area("Observações", value=cliente_dados['observacoes'] or '')
+                        
+                        st.warning("⚠️ **IMPORTANTE:** O valor financeiro (saldo, produtos, pagamentos) NÃO pode ser editado para evitar fraudes.")
+                        
+                        if st.form_submit_button("💾 Salvar Alterações", type="primary"):
+                            erros = []
+                            if not nome_edit:
+                                erros.append("Nome obrigatório")
+                            if not telefone_edit:
+                                erros.append("Telefone obrigatório")
+                            if cpf_edit and not valida_cpf(cpf_edit):
+                                erros.append("CPF inválido")
+                            
+                            if erros:
+                                for erro in erros:
+                                    st.error(f"❌ {erro}")
+                            else:
+                                dados_atualizados = {
+                                    'nome': nome_edit,
+                                    'telefone': telefone_edit,
+                                    'cpf': cpf_edit if cpf_edit else None,
+                                    'rg': rg_edit if rg_edit else None,
+                                    'data_nascimento': str(data_nasc_edit) if data_nasc_edit else None,
+                                    'email': email_edit if email_edit else None,
+                                    'celular': celular_edit if celular_edit else None,
+                                    'logradouro': logradouro_edit if logradouro_edit else None,
+                                    'numero': numero_edit if numero_edit else None,
+                                    'complemento': complemento_edit if complemento_edit else None,
+                                    'bairro': bairro_edit if bairro_edit else None,
+                                    'cidade': cidade_edit if cidade_edit else None,
+                                    'estado': estado_edit if estado_edit else None,
+                                    'cep': cep_edit if cep_edit else None,
+                                    'observacoes': observacoes_edit if observacoes_edit else None
+                                }
+                                
+                                if editar_cliente(cliente_editar, dados_atualizados):
+                                    st.success(f"✅ Cliente '{nome_edit}' atualizado com sucesso!")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Erro ao atualizar cliente")
+        
+        # ========== EXCLUIR CLIENTE ==========
         st.divider()
         st.subheader("🗑️ Excluir Cliente")
         
@@ -735,8 +896,43 @@ elif menu == "📝 Nova Fichinha":
                                     st.rerun()
                     else:
                         st.info("🔐 Autentique-se na seção 'Excluir Cliente' para excluir produtos padrão")
+                    
+                    # ========== EDIÇÃO DE PRODUTO PADRÃO ==========
+                    st.divider()
+                    st.subheader("✏️ Editar Produto Padrão")
+                    st.caption("⚠️ Apenas o NOME pode ser editado. O VALOR permanece o mesmo para evitar fraudes.")
+                    
+                    produto_editar = st.selectbox(
+                        "Selecione o produto padrão para editar",
+                        [p['id'] for p in produtos_padrao],
+                        format_func=lambda x: f"{next(p['nome'] for p in produtos_padrao if p['id'] == x)} - {formata_moeda(next(p['valor'] for p in produtos_padrao if p['id'] == x))}",
+                        key="editar_padrao"
+                    )
+                    
+                    if produto_editar:
+                        produto_dados = query_to_dict("SELECT * FROM produtos_padrao WHERE id = ?", (produto_editar,))
+                        
+                        if produto_dados:
+                            with st.form("form_editar_produto_padrao"):
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    nome_edit_padrao = st.text_input("Novo Nome do Produto*", value=produto_dados['nome'])
+                                with col2:
+                                    st.text_input("Valor (NÃO EDITÁVEL)", value=formata_moeda(produto_dados['valor']), disabled=True)
+                                
+                                st.warning("🔒 **O valor não pode ser alterado** para manter o histórico financeiro consistente.")
+                                
+                                if st.form_submit_button("💾 Salvar Alterações", type="primary"):
+                                    if not nome_edit_padrao:
+                                        st.error("❌ Nome do produto obrigatório")
+                                    else:
+                                        if editar_produto_padrao(produto_editar, nome_edit_padrao):
+                                            st.success(f"✅ Produto atualizado para '{nome_edit_padrao}'!")
+                                            st.rerun()
+                                        else:
+                                            st.error("❌ Erro ao atualizar produto")
                 else:
-                    st.info("ℹ️ Nenhum produto padrão cadastrado ainda.")
+                    st.info("ℹ️ Nenhum produto padrão cadastrado.")
             
             st.divider()
             st.subheader("➕ Adicionar Produto à Fichinha")
