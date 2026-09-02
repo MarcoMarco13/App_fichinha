@@ -5,7 +5,6 @@ from datetime import datetime
 import re
 import json
 import base64
-import io
 
 # ====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -15,7 +14,16 @@ st.set_page_config(page_title="Controle de Fichinha", page_icon="📋", layout="
 # ====================================================================
 # CONSTANTES
 # ====================================================================
-SENHA_GERENTE = "admin123"
+SENHA_GERENTE = "Locadora2023."
+
+# ====================================================================
+# USUÁRIOS AUTORIZADOS
+# ====================================================================
+USUARIOS = {
+    "admin": "Locadora2023.",
+    "gerente": "Locadora2023.",
+    "caixa": "Locadora2026."
+}
 
 # ====================================================================
 # ESTADO DA SESSÃO
@@ -28,6 +36,47 @@ if 'autenticado' not in st.session_state:
     st.session_state.autenticado = False
 if 'tempo_autenticacao' not in st.session_state:
     st.session_state.tempo_autenticacao = None
+if 'logado' not in st.session_state:
+    st.session_state.logado = False
+if 'usuario' not in st.session_state:
+    st.session_state.usuario = None
+
+# ====================================================================
+# FUNÇÕES DE AUTENTICAÇÃO
+# ====================================================================
+def verificar_login():
+    return st.session_state.logado
+
+def fazer_login(usuario, senha):
+    if usuario in USUARIOS and USUARIOS[usuario] == senha:
+        st.session_state.logado = True
+        st.session_state.usuario = usuario
+        return True
+    return False
+
+def fazer_logout():
+    st.session_state.logado = False
+    st.session_state.usuario = None
+    st.rerun()
+
+def tela_login():
+    st.title("🔐 Controle de Fichinha")
+    st.markdown("---")
+    st.subheader("Faça login para acessar o sistema")
+    
+    with st.form("form_login"):
+        usuario = st.text_input("Usuário")
+        senha = st.text_input("Senha", type="password")
+        
+        if st.form_submit_button("Entrar"):
+            if fazer_login(usuario, senha):
+                st.success(f"✅ Bem-vindo, {usuario}!")
+                st.rerun()
+            else:
+                st.error("❌ Usuário ou senha inválidos!")
+    
+    st.markdown("---")
+    st.caption("🔒 Sistema protegido | Acesso restrito")
 
 # ====================================================================
 # FUNÇÕES DE BANCO DE DADOS
@@ -36,7 +85,6 @@ def get_db():
     return sqlite3.connect('fichinha.db')
 
 def query_to_list(query, params=None):
-    """Executa uma query e retorna lista de dicionários"""
     conn = get_db()
     c = conn.cursor()
     if params:
@@ -51,12 +99,10 @@ def query_to_list(query, params=None):
     return resultados
 
 def query_to_dict(query, params=None):
-    """Executa uma query e retorna um único dicionário"""
     resultados = query_to_list(query, params)
     return resultados[0] if resultados else None
 
 def execute_query(query, params=None):
-    """Executa uma query INSERT/UPDATE/DELETE"""
     conn = get_db()
     c = conn.cursor()
     if params:
@@ -70,7 +116,6 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     
-    # Tabela clientes
     c.execute('''
         CREATE TABLE IF NOT EXISTS clientes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +141,6 @@ def init_db():
         )
     ''')
     
-    # Tabela produtos
     c.execute('''
         CREATE TABLE IF NOT EXISTS produtos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +154,6 @@ def init_db():
         )
     ''')
     
-    # Tabela pagamentos
     c.execute('''
         CREATE TABLE IF NOT EXISTS pagamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,7 +165,6 @@ def init_db():
         )
     ''')
     
-    # Tabela produtos padrão
     c.execute('''
         CREATE TABLE IF NOT EXISTS produtos_padrao (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,14 +204,11 @@ def migrar_banco():
 # FUNÇÕES DE SINCRONIZAÇÃO
 # ====================================================================
 def exportar_dados_json():
-    """Exporta todos os dados do banco para JSON"""
     conn = get_db()
-    
     clientes = pd.read_sql_query("SELECT * FROM clientes", conn)
     produtos = pd.read_sql_query("SELECT * FROM produtos", conn)
     pagamentos = pd.read_sql_query("SELECT * FROM pagamentos", conn)
     produtos_padrao = pd.read_sql_query("SELECT * FROM produtos_padrao", conn)
-    
     conn.close()
     
     dados = {
@@ -180,23 +219,18 @@ def exportar_dados_json():
         'data_exportacao': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'versao': '1.0'
     }
-    
     return json.dumps(dados, default=str, ensure_ascii=False)
 
 def importar_dados_json(json_data):
-    """Importa dados de um JSON para o banco atual"""
     dados = json.loads(json_data)
-    
     conn = get_db()
     c = conn.cursor()
     
-    # Limpa os dados atuais
     c.execute("DELETE FROM clientes")
     c.execute("DELETE FROM produtos")
     c.execute("DELETE FROM pagamentos")
     c.execute("DELETE FROM produtos_padrao")
     
-    # Importa clientes
     for cliente in dados['clientes']:
         c.execute('''
             INSERT INTO clientes 
@@ -212,7 +246,6 @@ def importar_dados_json(json_data):
             cliente['cep'], cliente['aceite_lgpd'], cliente['data_aceite_lgpd'], cliente['observacoes']
         ))
     
-    # Importa produtos
     for produto in dados['produtos']:
         c.execute('''
             INSERT INTO produtos 
@@ -223,7 +256,6 @@ def importar_dados_json(json_data):
             produto['data_compra'], produto['pago'], produto['tipo_pagamento'], produto['data_pagamento']
         ))
     
-    # Importa pagamentos
     for pagamento in dados['pagamentos']:
         c.execute('''
             INSERT INTO pagamentos 
@@ -234,7 +266,6 @@ def importar_dados_json(json_data):
             pagamento['tipo'], pagamento['data_pagamento'], pagamento['descricao']
         ))
     
-    # Importa produtos padrão
     for produto_padrao in dados['produtos_padrao']:
         c.execute('''
             INSERT INTO produtos_padrao 
@@ -247,7 +278,6 @@ def importar_dados_json(json_data):
     
     conn.commit()
     conn.close()
-    
     return len(dados['clientes'])
 
 # ====================================================================
@@ -392,7 +422,6 @@ def gerar_comprovante_html(cliente_id, produtos):
     </body>
     </html>
     """
-    
     return html
 
 # ====================================================================
@@ -401,10 +430,21 @@ def gerar_comprovante_html(cliente_id, produtos):
 init_db()
 
 # ====================================================================
+# VERIFICAR LOGIN
+# ====================================================================
+if not verificar_login():
+    tela_login()
+    st.stop()
+
+# ====================================================================
 # SIDEBAR
 # ====================================================================
 st.sidebar.title("📋 Fichinha")
+st.sidebar.success(f"👋 Olá, {st.session_state.usuario}!")
 st.sidebar.markdown("---")
+
+if st.sidebar.button("🚪 Sair", use_container_width=True):
+    fazer_logout()
 
 menu = st.sidebar.radio(
     "Navegação",
@@ -451,7 +491,6 @@ if menu == "🏠 Dashboard":
 elif menu == "👤 Clientes":
     st.title("👤 Clientes")
     
-    # Formulário de cadastro
     with st.expander("➕ Novo Cliente", expanded=False):
         with st.form("form_cliente"):
             nome = st.text_input("Nome*", value=st.session_state.form_data.get('nome', ''))
@@ -541,7 +580,6 @@ elif menu == "👤 Clientes":
                     st.success(f"✅ Cliente cadastrado!")
                     st.rerun()
     
-    # Lista de clientes
     st.subheader("📋 Lista de Clientes")
     clientes = query_to_list("""
         SELECT c.id, c.nome, c.telefone, c.modo_seguro, c.cpf,
@@ -564,7 +602,6 @@ elif menu == "👤 Clientes":
             use_container_width=True
         )
         
-        # Exclusão com autenticação
         st.divider()
         st.subheader("🗑️ Excluir Cliente")
         
@@ -630,7 +667,6 @@ elif menu == "📝 Nova Fichinha":
             if next(c['modo_seguro'] for c in clientes if c['id'] == cliente_id):
                 st.warning("🔒 Cliente em Modo Seguro")
             
-            # ========== SEÇÃO: GERENCIAR PRODUTOS PADRÃO ==========
             with st.expander("🏷️ Gerenciar Produtos Padrão", expanded=False):
                 st.caption("Cadastre produtos com preços fixos para agilizar o atendimento")
                 
@@ -663,8 +699,6 @@ elif menu == "📝 Nova Fichinha":
                             except sqlite3.IntegrityError:
                                 st.error("❌ Produto já cadastrado!")
                 
-                # Lista de produtos padrão
-                st.subheader("📋 Produtos Padrão Cadastrados")
                 produtos_padrao = query_to_list("SELECT id, nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome")
                 
                 if produtos_padrao:
@@ -704,7 +738,6 @@ elif menu == "📝 Nova Fichinha":
                 else:
                     st.info("ℹ️ Nenhum produto padrão cadastrado ainda.")
             
-            # ========== ADICIONAR PRODUTO À FICHINHA ==========
             st.divider()
             st.subheader("➕ Adicionar Produto à Fichinha")
             
@@ -768,7 +801,6 @@ elif menu == "📝 Nova Fichinha":
                             st.success(f"✅ Produto '{nome}' adicionado com valor personalizado!")
                             st.rerun()
             
-            # ========== LISTA DE PRODUTOS PENDENTES ==========
             st.divider()
             st.subheader("📋 Fichinha Atual")
             
@@ -783,7 +815,6 @@ elif menu == "📝 Nova Fichinha":
                 st.dataframe(df_produtos[['nome', 'valor_fmt', 'data_compra']], use_container_width=True)
                 st.metric("💰 Total da Fichinha", formata_moeda(df_produtos['valor'].sum()))
                 
-                # ========== EXCLUIR PRODUTO COM AUTENTICAÇÃO ==========
                 st.divider()
                 st.subheader("🗑️ Excluir Produto da Fichinha")
                 st.caption("🔒 Requer autenticação do gerente para evitar exclusões acidentais")
@@ -938,7 +969,6 @@ elif menu == "💰 Pagamentos":
                                     st.balloons()
                                 st.rerun()
             
-            # Histórico de pagamentos
             st.subheader("📋 Histórico de Pagamentos")
             historico = query_to_list(
                 "SELECT valor, tipo, data_pagamento, descricao FROM pagamentos WHERE cliente_id = ? ORDER BY id DESC LIMIT 30",
