@@ -3,8 +3,9 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 import re
-import io
+import json
 import base64
+import io
 
 # ====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -33,6 +34,37 @@ if 'tempo_autenticacao' not in st.session_state:
 # ====================================================================
 def get_db():
     return sqlite3.connect('fichinha.db')
+
+def query_to_list(query, params=None):
+    """Executa uma query e retorna lista de dicionários"""
+    conn = get_db()
+    c = conn.cursor()
+    if params:
+        c.execute(query, params)
+    else:
+        c.execute(query)
+    colunas = [descricao[0] for descricao in c.description] if c.description else []
+    resultados = []
+    for row in c.fetchall():
+        resultados.append(dict(zip(colunas, row)))
+    conn.close()
+    return resultados
+
+def query_to_dict(query, params=None):
+    """Executa uma query e retorna um único dicionário"""
+    resultados = query_to_list(query, params)
+    return resultados[0] if resultados else None
+
+def execute_query(query, params=None):
+    """Executa uma query INSERT/UPDATE/DELETE"""
+    conn = get_db()
+    c = conn.cursor()
+    if params:
+        c.execute(query, params)
+    else:
+        c.execute(query)
+    conn.commit()
+    conn.close()
 
 def init_db():
     conn = get_db()
@@ -78,7 +110,7 @@ def init_db():
         )
     ''')
     
-    # Tabela pagamentos (apenas histórico)
+    # Tabela pagamentos
     c.execute('''
         CREATE TABLE IF NOT EXISTS pagamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,11 +137,9 @@ def init_db():
     migrar_banco()
 
 def migrar_banco():
-    """Adiciona colunas e tabelas faltantes se necessário"""
     conn = get_db()
     c = conn.cursor()
     
-    # Verifica colunas da tabela clientes
     c.execute("PRAGMA table_info(clientes)")
     colunas = [col[1] for col in c.fetchall()]
     
@@ -125,20 +155,100 @@ def migrar_banco():
             except:
                 pass
     
-    # Verifica se a tabela produtos_padrao existe
-    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='produtos_padrao'")
-    if not c.fetchone():
+    conn.commit()
+    conn.close()
+
+# ====================================================================
+# FUNÇÕES DE SINCRONIZAÇÃO
+# ====================================================================
+def exportar_dados_json():
+    """Exporta todos os dados do banco para JSON"""
+    conn = get_db()
+    
+    clientes = pd.read_sql_query("SELECT * FROM clientes", conn)
+    produtos = pd.read_sql_query("SELECT * FROM produtos", conn)
+    pagamentos = pd.read_sql_query("SELECT * FROM pagamentos", conn)
+    produtos_padrao = pd.read_sql_query("SELECT * FROM produtos_padrao", conn)
+    
+    conn.close()
+    
+    dados = {
+        'clientes': clientes.to_dict('records'),
+        'produtos': produtos.to_dict('records'),
+        'pagamentos': pagamentos.to_dict('records'),
+        'produtos_padrao': produtos_padrao.to_dict('records'),
+        'data_exportacao': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'versao': '1.0'
+    }
+    
+    return json.dumps(dados, default=str, ensure_ascii=False)
+
+def importar_dados_json(json_data):
+    """Importa dados de um JSON para o banco atual"""
+    dados = json.loads(json_data)
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Limpa os dados atuais
+    c.execute("DELETE FROM clientes")
+    c.execute("DELETE FROM produtos")
+    c.execute("DELETE FROM pagamentos")
+    c.execute("DELETE FROM produtos_padrao")
+    
+    # Importa clientes
+    for cliente in dados['clientes']:
         c.execute('''
-            CREATE TABLE produtos_padrao (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT NOT NULL UNIQUE,
-                valor REAL NOT NULL,
-                data_cadastro TEXT
-            )
-        ''')
+            INSERT INTO clientes 
+            (id, nome, telefone, data_cadastro, modo_seguro, cpf, rg, data_nascimento, 
+             email, celular, logradouro, numero, complemento, bairro, cidade, estado, cep,
+             aceite_lgpd, data_aceite_lgpd, observacoes) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            cliente['id'], cliente['nome'], cliente['telefone'], cliente['data_cadastro'],
+            cliente['modo_seguro'], cliente['cpf'], cliente['rg'], cliente['data_nascimento'],
+            cliente['email'], cliente['celular'], cliente['logradouro'], cliente['numero'],
+            cliente['complemento'], cliente['bairro'], cliente['cidade'], cliente['estado'],
+            cliente['cep'], cliente['aceite_lgpd'], cliente['data_aceite_lgpd'], cliente['observacoes']
+        ))
+    
+    # Importa produtos
+    for produto in dados['produtos']:
+        c.execute('''
+            INSERT INTO produtos 
+            (id, cliente_id, nome, valor, data_compra, pago, tipo_pagamento, data_pagamento) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            produto['id'], produto['cliente_id'], produto['nome'], produto['valor'],
+            produto['data_compra'], produto['pago'], produto['tipo_pagamento'], produto['data_pagamento']
+        ))
+    
+    # Importa pagamentos
+    for pagamento in dados['pagamentos']:
+        c.execute('''
+            INSERT INTO pagamentos 
+            (id, cliente_id, valor, tipo, data_pagamento, descricao) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            pagamento['id'], pagamento['cliente_id'], pagamento['valor'],
+            pagamento['tipo'], pagamento['data_pagamento'], pagamento['descricao']
+        ))
+    
+    # Importa produtos padrão
+    for produto_padrao in dados['produtos_padrao']:
+        c.execute('''
+            INSERT INTO produtos_padrao 
+            (id, nome, valor, data_cadastro) 
+            VALUES (?, ?, ?, ?)
+        ''', (
+            produto_padrao['id'], produto_padrao['nome'], 
+            produto_padrao['valor'], produto_padrao['data_cadastro']
+        ))
     
     conn.commit()
     conn.close()
+    
+    return len(dados['clientes'])
 
 # ====================================================================
 # FUNÇÕES DE VALIDAÇÃO E FORMATAÇÃO
@@ -166,14 +276,11 @@ def formata_moeda(valor):
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def calcula_saldo(cliente_id):
-    """Calcula o saldo CORRETO (apenas produtos não pagos)"""
-    conn = get_db()
-    df = pd.read_sql_query(
+    result = query_to_dict(
         "SELECT SUM(valor) as total FROM produtos WHERE cliente_id = ? AND pago = 0",
-        conn, params=(cliente_id,)
+        (cliente_id,)
     )
-    conn.close()
-    return df['total'].iloc[0] or 0.0
+    return result['total'] if result and result['total'] else 0.0
 
 def autentica(senha):
     if senha == SENHA_GERENTE:
@@ -195,13 +302,12 @@ def esta_autenticado():
     return False
 
 # ====================================================================
-# FUNÇÃO PARA GERAR PDF (versão HTML - sem reportlab)
+# FUNÇÃO PARA GERAR COMPROVANTE (HTML)
 # ====================================================================
-def gerar_pdf_html(cliente_id, produtos):
-    """Gera um PDF em formato HTML (compatível com qualquer navegador)"""
-    conn = get_db()
-    cliente = pd.read_sql_query("SELECT * FROM clientes WHERE id = ?", conn, params=(cliente_id,)).iloc[0]
-    conn.close()
+def gerar_comprovante_html(cliente_id, produtos):
+    cliente = query_to_dict("SELECT * FROM clientes WHERE id = ?", (cliente_id,))
+    if not cliente:
+        return None
     
     html = f"""
     <!DOCTYPE html>
@@ -237,10 +343,10 @@ def gerar_pdf_html(cliente_id, produtos):
             <p><strong>Telefone:</strong> {cliente['telefone'] or 'Não informado'}</p>
     """
     
-    if cliente['celular']:
+    if cliente.get('celular'):
         html += f"<p><strong>Celular:</strong> {cliente['celular']}</p>"
     
-    if cliente['logradouro']:
+    if cliente.get('logradouro'):
         html += f"""
             <p><strong>Endereço:</strong> {cliente['logradouro']}, {cliente['numero']}</p>
             <p><strong>Bairro:</strong> {cliente['bairro']}, {cliente['cidade']} - {cliente['estado']}</p>
@@ -261,7 +367,7 @@ def gerar_pdf_html(cliente_id, produtos):
     """
     
     total = 0
-    for i, (_, p) in enumerate(produtos.iterrows(), 1):
+    for i, p in enumerate(produtos, 1):
         html += f"""
             <tr>
                 <td>{i}</td>
@@ -282,20 +388,12 @@ def gerar_pdf_html(cliente_id, produtos):
         <div class="footer">
             <p>Este documento tem validade como comprovante de dívida para fins de cobrança judicial ou extrajudicial,<br>
             conforme previsto no Código Civil Brasileiro (Lei nº 10.406/2002).</p>
-            <p style="margin-top: 10px; font-size: 9px; color: #999;">Documento gerado automaticamente pelo sistema de controle de fichinha.</p>
         </div>
     </body>
     </html>
     """
     
     return html
-
-def gerar_pdf_download(cliente_id, produtos):
-    """Gera o HTML e cria um link para download como arquivo HTML (funciona como PDF)"""
-    html = gerar_pdf_html(cliente_id, produtos)
-    b64 = base64.b64encode(html.encode()).decode()
-    href = f'<a href="data:text/html;base64,{b64}" download="comprovante_divida_{datetime.now().strftime("%Y%m%d_%H%M")}.html">📥 Baixar Comprovante (HTML)</a>'
-    return href
 
 # ====================================================================
 # INICIALIZAÇÃO
@@ -334,13 +432,11 @@ st.sidebar.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 if menu == "🏠 Dashboard":
     st.title("🏠 Dashboard")
     
-    conn = get_db()
-    total_clientes = pd.read_sql_query("SELECT COUNT(*) as total FROM clientes", conn)['total'].iloc[0]
-    total_pendentes = pd.read_sql_query("SELECT COUNT(*) as total FROM produtos WHERE pago = 0", conn)['total'].iloc[0]
-    valor_aberto = pd.read_sql_query("SELECT SUM(valor) as total FROM produtos WHERE pago = 0", conn)['total'].iloc[0] or 0
-    clientes_seguro = pd.read_sql_query("SELECT COUNT(*) as total FROM clientes WHERE modo_seguro = 1", conn)['total'].iloc[0]
-    total_padrao = pd.read_sql_query("SELECT COUNT(*) as total FROM produtos_padrao", conn)['total'].iloc[0]
-    conn.close()
+    total_clientes = query_to_dict("SELECT COUNT(*) as total FROM clientes")['total'] or 0
+    total_pendentes = query_to_dict("SELECT COUNT(*) as total FROM produtos WHERE pago = 0")['total'] or 0
+    valor_aberto = query_to_dict("SELECT SUM(valor) as total FROM produtos WHERE pago = 0")['total'] or 0
+    clientes_seguro = query_to_dict("SELECT COUNT(*) as total FROM clientes WHERE modo_seguro = 1")['total'] or 0
+    total_padrao = query_to_dict("SELECT COUNT(*) as total FROM produtos_padrao")['total'] or 0
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("👤 Clientes", total_clientes)
@@ -447,8 +543,7 @@ elif menu == "👤 Clientes":
     
     # Lista de clientes
     st.subheader("📋 Lista de Clientes")
-    conn = get_db()
-    df = pd.read_sql_query("""
+    clientes = query_to_list("""
         SELECT c.id, c.nome, c.telefone, c.modo_seguro, c.cpf,
                COUNT(p.id) as qtd_produtos,
                SUM(CASE WHEN p.pago = 0 THEN p.valor ELSE 0 END) as saldo
@@ -456,10 +551,10 @@ elif menu == "👤 Clientes":
         LEFT JOIN produtos p ON c.id = p.cliente_id
         GROUP BY c.id
         ORDER BY c.id DESC
-    """, conn)
-    conn.close()
+    """)
     
-    if not df.empty:
+    if clientes:
+        df = pd.DataFrame(clientes)
         df['saldo'] = df['saldo'].fillna(0)
         df['saldo_fmt'] = df['saldo'].apply(formata_moeda)
         df['modo'] = df['modo_seguro'].apply(lambda x: "🔒" if x else "📱")
@@ -490,13 +585,13 @@ elif menu == "👤 Clientes":
             
             cliente_id = st.selectbox(
                 "Selecione o cliente para excluir",
-                df['id'].tolist(),
-                format_func=lambda x: df[df['id'] == x]['nome'].iloc[0]
+                [c['id'] for c in clientes],
+                format_func=lambda x: next(c['nome'] for c in clientes if c['id'] == x)
             )
             
             if cliente_id:
-                nome_cliente = df[df['id'] == cliente_id]['nome'].iloc[0]
-                saldo = df[df['id'] == cliente_id]['saldo'].iloc[0]
+                nome_cliente = next(c['nome'] for c in clientes if c['id'] == cliente_id)
+                saldo = next(c['saldo'] for c in clientes if c['id'] == cliente_id)
                 
                 if saldo > 0:
                     st.warning(f"⚠️ Cliente tem saldo de {formata_moeda(saldo)} pendente!")
@@ -505,13 +600,9 @@ elif menu == "👤 Clientes":
                 
                 if confirmar == nome_cliente:
                     if st.button("🗑️ EXCLUIR PERMANENTEMENTE", type="primary"):
-                        conn = get_db()
-                        c = conn.cursor()
-                        c.execute("DELETE FROM pagamentos WHERE cliente_id = ?", (cliente_id,))
-                        c.execute("DELETE FROM produtos WHERE cliente_id = ?", (cliente_id,))
-                        c.execute("DELETE FROM clientes WHERE id = ?", (cliente_id,))
-                        conn.commit()
-                        conn.close()
+                        execute_query("DELETE FROM pagamentos WHERE cliente_id = ?", (cliente_id,))
+                        execute_query("DELETE FROM produtos WHERE cliente_id = ?", (cliente_id,))
+                        execute_query("DELETE FROM clientes WHERE id = ?", (cliente_id,))
                         st.success(f"✅ Cliente excluído!")
                         st.rerun()
     else:
@@ -521,31 +612,28 @@ elif menu == "👤 Clientes":
 elif menu == "📝 Nova Fichinha":
     st.title("📝 Nova Fichinha")
     
-    conn = get_db()
-    clientes = pd.read_sql_query("SELECT id, nome, modo_seguro FROM clientes ORDER BY nome", conn)
-    conn.close()
+    clientes = query_to_list("SELECT id, nome, modo_seguro FROM clientes ORDER BY nome")
     
-    if clientes.empty:
+    if not clientes:
         st.warning("⚠️ Cadastre um cliente primeiro!")
     else:
         cliente_id = st.selectbox(
             "Cliente",
-            clientes['id'].tolist(),
-            format_func=lambda x: f"{clientes[clientes['id'] == x]['nome'].iloc[0]} {'🔒' if clientes[clientes['id'] == x]['modo_seguro'].iloc[0] else ''}"
+            [c['id'] for c in clientes],
+            format_func=lambda x: f"{next(c['nome'] for c in clientes if c['id'] == x)} {'🔒' if next(c['modo_seguro'] for c in clientes if c['id'] == x) else ''}"
         )
         
         if cliente_id:
             saldo = calcula_saldo(cliente_id)
             st.info(f"💰 Saldo atual: {formata_moeda(saldo)}")
             
-            if clientes[clientes['id'] == cliente_id]['modo_seguro'].iloc[0]:
+            if next(c['modo_seguro'] for c in clientes if c['id'] == cliente_id):
                 st.warning("🔒 Cliente em Modo Seguro")
             
             # ========== SEÇÃO: GERENCIAR PRODUTOS PADRÃO ==========
             with st.expander("🏷️ Gerenciar Produtos Padrão", expanded=False):
                 st.caption("Cadastre produtos com preços fixos para agilizar o atendimento")
                 
-                # Formulário para cadastrar produto padrão
                 with st.form("form_produto_padrao", clear_on_submit=True):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -566,14 +654,10 @@ elif menu == "📝 Nova Fichinha":
                             st.error("❌ Valor deve ser maior que zero")
                         else:
                             try:
-                                conn = get_db()
-                                c = conn.cursor()
-                                c.execute(
+                                execute_query(
                                     "INSERT INTO produtos_padrao (nome, valor, data_cadastro) VALUES (?, ?, ?)",
                                     (nome_padrao, valor_padrao, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                                 )
-                                conn.commit()
-                                conn.close()
                                 st.success(f"✅ Produto '{nome_padrao}' cadastrado com sucesso!")
                                 st.rerun()
                             except sqlite3.IntegrityError:
@@ -581,14 +665,10 @@ elif menu == "📝 Nova Fichinha":
                 
                 # Lista de produtos padrão
                 st.subheader("📋 Produtos Padrão Cadastrados")
-                conn = get_db()
-                df_padrao = pd.read_sql_query(
-                    "SELECT id, nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome",
-                    conn
-                )
-                conn.close()
+                produtos_padrao = query_to_list("SELECT id, nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome")
                 
-                if not df_padrao.empty:
+                if produtos_padrao:
+                    df_padrao = pd.DataFrame(produtos_padrao)
                     df_padrao['valor_fmt'] = df_padrao['valor'].apply(formata_moeda)
                     st.dataframe(
                         df_padrao[['nome', 'valor_fmt', 'data_cadastro']],
@@ -600,28 +680,23 @@ elif menu == "📝 Nova Fichinha":
                         use_container_width=True
                     )
                     
-                    # Botão para excluir produto padrão (com autenticação)
                     st.caption("🔒 Para excluir um produto padrão, autentique-se como gerente")
                     
                     if esta_autenticado():
                         produto_excluir = st.selectbox(
                             "Selecione o produto padrão para excluir",
-                            df_padrao['id'].tolist(),
-                            format_func=lambda x: f"{df_padrao[df_padrao['id'] == x]['nome'].iloc[0]} - {formata_moeda(df_padrao[df_padrao['id'] == x]['valor'].iloc[0])}",
+                            [p['id'] for p in produtos_padrao],
+                            format_func=lambda x: f"{next(p['nome'] for p in produtos_padrao if p['id'] == x)} - {formata_moeda(next(p['valor'] for p in produtos_padrao if p['id'] == x))}",
                             key="excluir_padrao"
                         )
                         
                         if produto_excluir:
-                            nome_excluir = df_padrao[df_padrao['id'] == produto_excluir]['nome'].iloc[0]
+                            nome_excluir = next(p['nome'] for p in produtos_padrao if p['id'] == produto_excluir)
                             confirmar = st.text_input(f"Digite '{nome_excluir}' para confirmar exclusão:", key="confirma_padrao")
                             
                             if confirmar == nome_excluir:
                                 if st.button("🗑️ Excluir Produto Padrão", type="primary"):
-                                    conn = get_db()
-                                    c = conn.cursor()
-                                    c.execute("DELETE FROM produtos_padrao WHERE id = ?", (produto_excluir,))
-                                    conn.commit()
-                                    conn.close()
+                                    execute_query("DELETE FROM produtos_padrao WHERE id = ?", (produto_excluir,))
                                     st.success(f"✅ Produto '{nome_excluir}' excluído!")
                                     st.rerun()
                     else:
@@ -633,12 +708,8 @@ elif menu == "📝 Nova Fichinha":
             st.divider()
             st.subheader("➕ Adicionar Produto à Fichinha")
             
-            # Busca produtos padrão
-            conn = get_db()
-            df_padrao = pd.read_sql_query("SELECT id, nome, valor FROM produtos_padrao ORDER BY nome", conn)
-            conn.close()
+            produtos_padrao = query_to_list("SELECT id, nome, valor FROM produtos_padrao ORDER BY nome")
             
-            # Opção de escolha: Produto Padrão ou Personalizado
             modo_adicao = st.radio(
                 "Tipo de produto:",
                 ["📦 Produto Padrão", "✏️ Valor Personalizado"],
@@ -646,37 +717,30 @@ elif menu == "📝 Nova Fichinha":
             )
             
             if modo_adicao == "📦 Produto Padrão":
-                # ========== PRODUTO PADRÃO ==========
-                if df_padrao.empty:
-                    st.warning("⚠️ Nenhum produto padrão cadastrado. Cadastre na seção 'Gerenciar Produtos Padrão'.")
+                if not produtos_padrao:
+                    st.warning("⚠️ Nenhum produto padrão cadastrado.")
                 else:
                     with st.form("form_produto_padrao_ficha", clear_on_submit=True):
                         produto_selecionado = st.selectbox(
                             "Selecione o produto",
-                            df_padrao['id'].tolist(),
-                            format_func=lambda x: f"{df_padrao[df_padrao['id'] == x]['nome'].iloc[0]} - {formata_moeda(df_padrao[df_padrao['id'] == x]['valor'].iloc[0])}"
+                            [p['id'] for p in produtos_padrao],
+                            format_func=lambda x: f"{next(p['nome'] for p in produtos_padrao if p['id'] == x)} - {formata_moeda(next(p['valor'] for p in produtos_padrao if p['id'] == x))}"
                         )
                         
                         if produto_selecionado:
-                            nome_produto = df_padrao[df_padrao['id'] == produto_selecionado]['nome'].iloc[0]
-                            valor_produto = df_padrao[df_padrao['id'] == produto_selecionado]['valor'].iloc[0]
+                            nome_produto = next(p['nome'] for p in produtos_padrao if p['id'] == produto_selecionado)
+                            valor_produto = next(p['valor'] for p in produtos_padrao if p['id'] == produto_selecionado)
                             
                             st.info(f"📦 Produto: **{nome_produto}** - Valor: {formata_moeda(valor_produto)}")
                             
                             if st.form_submit_button("✅ Adicionar à Fichinha"):
-                                conn = get_db()
-                                c = conn.cursor()
-                                c.execute(
+                                execute_query(
                                     "INSERT INTO produtos (cliente_id, nome, valor, data_compra, pago) VALUES (?, ?, ?, ?, 0)",
                                     (cliente_id, nome_produto, valor_produto, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                                 )
-                                conn.commit()
-                                conn.close()
                                 st.success(f"✅ Produto '{nome_produto}' adicionado!")
                                 st.rerun()
-            
             else:
-                # ========== VALOR PERSONALIZADO (Promoções) ==========
                 with st.form("form_produto_personalizado", clear_on_submit=True):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -697,14 +761,10 @@ elif menu == "📝 Nova Fichinha":
                         if not nome:
                             st.error("❌ Nome do produto obrigatório")
                         else:
-                            conn = get_db()
-                            c = conn.cursor()
-                            c.execute(
+                            execute_query(
                                 "INSERT INTO produtos (cliente_id, nome, valor, data_compra, pago) VALUES (?, ?, ?, ?, 0)",
                                 (cliente_id, nome, valor, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                             )
-                            conn.commit()
-                            conn.close()
                             st.success(f"✅ Produto '{nome}' adicionado com valor personalizado!")
                             st.rerun()
             
@@ -712,17 +772,16 @@ elif menu == "📝 Nova Fichinha":
             st.divider()
             st.subheader("📋 Fichinha Atual")
             
-            conn = get_db()
-            produtos = pd.read_sql_query(
+            produtos = query_to_list(
                 "SELECT id, nome, valor, data_compra FROM produtos WHERE cliente_id = ? AND pago = 0 ORDER BY id DESC",
-                conn, params=(cliente_id,)
+                (cliente_id,)
             )
-            conn.close()
             
-            if not produtos.empty:
-                produtos['valor_fmt'] = produtos['valor'].apply(formata_moeda)
-                st.dataframe(produtos[['nome', 'valor_fmt', 'data_compra']], use_container_width=True)
-                st.metric("💰 Total da Fichinha", formata_moeda(produtos['valor'].sum()))
+            if produtos:
+                df_produtos = pd.DataFrame(produtos)
+                df_produtos['valor_fmt'] = df_produtos['valor'].apply(formata_moeda)
+                st.dataframe(df_produtos[['nome', 'valor_fmt', 'data_compra']], use_container_width=True)
+                st.metric("💰 Total da Fichinha", formata_moeda(df_produtos['valor'].sum()))
                 
                 # ========== EXCLUIR PRODUTO COM AUTENTICAÇÃO ==========
                 st.divider()
@@ -751,13 +810,13 @@ elif menu == "📝 Nova Fichinha":
                     
                     produto_id = st.selectbox(
                         "Selecione o produto para excluir",
-                        produtos['id'].tolist(),
-                        format_func=lambda x: f"{produtos[produtos['id'] == x]['nome'].iloc[0]} - {formata_moeda(produtos[produtos['id'] == x]['valor'].iloc[0])}"
+                        [p['id'] for p in produtos],
+                        format_func=lambda x: f"{next(p['nome'] for p in produtos if p['id'] == x)} - {formata_moeda(next(p['valor'] for p in produtos if p['id'] == x))}"
                     )
                     
                     if produto_id:
-                        nome_produto = produtos[produtos['id'] == produto_id]['nome'].iloc[0]
-                        valor_produto = produtos[produtos['id'] == produto_id]['valor'].iloc[0]
+                        nome_produto = next(p['nome'] for p in produtos if p['id'] == produto_id)
+                        valor_produto = next(p['valor'] for p in produtos if p['id'] == produto_id)
                         
                         st.warning(f"⚠️ Você está prestes a excluir: **{nome_produto}** ({formata_moeda(valor_produto)})")
                         
@@ -768,11 +827,7 @@ elif menu == "📝 Nova Fichinha":
                         
                         if confirmar == nome_produto:
                             if st.button("🗑️ EXCLUIR PRODUTO", type="primary", use_container_width=True):
-                                conn = get_db()
-                                c = conn.cursor()
-                                c.execute("DELETE FROM produtos WHERE id = ?", (produto_id,))
-                                conn.commit()
-                                conn.close()
+                                execute_query("DELETE FROM produtos WHERE id = ?", (produto_id,))
                                 st.success(f"✅ Produto excluído!")
                                 st.rerun()
                         else:
@@ -787,17 +842,15 @@ elif menu == "📝 Nova Fichinha":
 elif menu == "💰 Pagamentos":
     st.title("💰 Pagamentos")
     
-    conn = get_db()
-    clientes = pd.read_sql_query("SELECT id, nome FROM clientes ORDER BY nome", conn)
-    conn.close()
+    clientes = query_to_list("SELECT id, nome FROM clientes ORDER BY nome")
     
-    if clientes.empty:
+    if not clientes:
         st.warning("⚠️ Cadastre um cliente primeiro!")
     else:
         cliente_id = st.selectbox(
             "Cliente",
-            clientes['id'].tolist(),
-            format_func=lambda x: clientes[clientes['id'] == x]['nome'].iloc[0]
+            [c['id'] for c in clientes],
+            format_func=lambda x: next(c['nome'] for c in clientes if c['id'] == x)
         )
         
         if cliente_id:
@@ -807,19 +860,17 @@ elif menu == "💰 Pagamentos":
             if saldo <= 0:
                 st.success("✅ Cliente não possui débitos!")
             else:
-                # Mostra produtos pendentes
-                conn = get_db()
-                produtos = pd.read_sql_query(
+                produtos = query_to_list(
                     "SELECT id, nome, valor FROM produtos WHERE cliente_id = ? AND pago = 0 ORDER BY data_compra ASC",
-                    conn, params=(cliente_id,)
+                    (cliente_id,)
                 )
-                conn.close()
                 
-                if not produtos.empty:
-                    produtos['valor_fmt'] = produtos['valor'].apply(formata_moeda)
+                if produtos:
+                    df_produtos = pd.DataFrame(produtos)
+                    df_produtos['valor_fmt'] = df_produtos['valor'].apply(formata_moeda)
                     st.subheader("📋 Produtos em Aberto")
-                    st.dataframe(produtos[['nome', 'valor_fmt']], use_container_width=True)
-                    st.metric("💲 Total", formata_moeda(produtos['valor'].sum()))
+                    st.dataframe(df_produtos[['nome', 'valor_fmt']], use_container_width=True)
+                    st.metric("💲 Total", formata_moeda(df_produtos['valor'].sum()))
                     
                     with st.form("form_pagamento"):
                         c1, c2 = st.columns(2)
@@ -848,9 +899,8 @@ elif menu == "💰 Pagamentos":
                                 conn = get_db()
                                 c = conn.cursor()
                                 
-                                # Abate os produtos (FIFO)
                                 valor_restante = valor
-                                for _, row in produtos.iterrows():
+                                for row in produtos:
                                     if valor_restante <= 0:
                                         break
                                     
@@ -873,7 +923,6 @@ elif menu == "💰 Pagamentos":
                                         )
                                         valor_restante = 0
                                 
-                                # Registra no histórico
                                 c.execute(
                                     "INSERT INTO pagamentos (cliente_id, valor, tipo, data_pagamento, descricao) VALUES (?, ?, ?, ?, ?)",
                                     (cliente_id, valor, tipo, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), descricao)
@@ -891,39 +940,37 @@ elif menu == "💰 Pagamentos":
             
             # Histórico de pagamentos
             st.subheader("📋 Histórico de Pagamentos")
-            conn = get_db()
-            historico = pd.read_sql_query(
+            historico = query_to_list(
                 "SELECT valor, tipo, data_pagamento, descricao FROM pagamentos WHERE cliente_id = ? ORDER BY id DESC LIMIT 30",
-                conn, params=(cliente_id,)
+                (cliente_id,)
             )
-            conn.close()
             
-            if not historico.empty:
-                historico['valor_fmt'] = historico['valor'].apply(formata_moeda)
-                historico['tipo'] = historico['tipo'].apply(
+            if historico:
+                df_historico = pd.DataFrame(historico)
+                df_historico['valor_fmt'] = df_historico['valor'].apply(formata_moeda)
+                df_historico['tipo'] = df_historico['tipo'].apply(
                     lambda x: {"dinheiro": "💵", "cartao": "💳", "pix": "📱"}.get(x, x)
                 )
-                st.dataframe(historico[['valor_fmt', 'tipo', 'data_pagamento', 'descricao']], use_container_width=True)
+                st.dataframe(df_historico[['valor_fmt', 'tipo', 'data_pagamento', 'descricao']], use_container_width=True)
 
 # -------------------- RELATÓRIOS --------------------
 elif menu == "📊 Relatórios":
     st.title("📊 Relatórios")
     
-    tab1, tab2, tab3 = st.tabs(["📈 Devedores", "🏷️ Produtos Padrão", "📤 Exportar"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Devedores", "🏷️ Produtos Padrão", "📤 Exportar", "🔄 Sincronizar"])
     
     with tab1:
-        conn = get_db()
-        df = pd.read_sql_query("""
+        devedores = query_to_list("""
             SELECT c.nome, c.telefone, c.modo_seguro, SUM(p.valor) as total, COUNT(p.id) as qtd
             FROM clientes c
             JOIN produtos p ON c.id = p.cliente_id
             WHERE p.pago = 0
             GROUP BY c.id
             ORDER BY total DESC
-        """, conn)
-        conn.close()
+        """)
         
-        if not df.empty:
+        if devedores:
+            df = pd.DataFrame(devedores)
             df['total_fmt'] = df['total'].apply(formata_moeda)
             df['modo'] = df['modo_seguro'].apply(lambda x: "🔒" if x else "📱")
             st.dataframe(df[['nome', 'telefone', 'modo', 'qtd', 'total_fmt']], use_container_width=True)
@@ -935,17 +982,13 @@ elif menu == "📊 Relatórios":
     
     with tab2:
         st.subheader("🏷️ Produtos Padrão Cadastrados")
-        conn = get_db()
-        df_padrao = pd.read_sql_query(
-            "SELECT nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome",
-            conn
-        )
-        conn.close()
+        produtos_padrao = query_to_list("SELECT nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome")
         
-        if not df_padrao.empty:
-            df_padrao['valor_fmt'] = df_padrao['valor'].apply(formata_moeda)
+        if produtos_padrao:
+            df = pd.DataFrame(produtos_padrao)
+            df['valor_fmt'] = df['valor'].apply(formata_moeda)
             st.dataframe(
-                df_padrao[['nome', 'valor_fmt', 'data_cadastro']],
+                df[['nome', 'valor_fmt', 'data_cadastro']],
                 column_config={
                     "nome": "Produto",
                     "valor_fmt": "Valor",
@@ -973,3 +1016,45 @@ elif menu == "📊 Relatórios":
             with col2:
                 st.download_button("📥 Pagamentos", pg.to_csv(index=False).encode(), "pagamentos.csv", "text/csv")
                 st.download_button("📥 Produtos Padrão", pp.to_csv(index=False).encode(), "produtos_padrao.csv", "text/csv")
+    
+    with tab4:
+        st.subheader("🔄 Sincronizar com Outra Versão")
+        
+        st.info("""
+        **Como funciona:**
+        1. Exporte os dados de uma versão (nuvem ou local)
+        2. Importe na outra versão
+        3. Os dados ficam iguais nos dois lugares
+        """)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**📤 Exportar Dados (deste app)**")
+            if st.button("📥 Exportar JSON", use_container_width=True):
+                dados_json = exportar_dados_json()
+                b64 = base64.b64encode(dados_json.encode()).decode()
+                href = f'<a href="data:application/json;base64,{b64}" download="backup_fichinha_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json">📥 Baixar Backup</a>'
+                st.markdown(href, unsafe_allow_html=True)
+                st.success("✅ Dados exportados com sucesso!")
+        
+        with col2:
+            st.markdown("**📥 Importar Dados (para este app)**")
+            arquivo = st.file_uploader("Escolha o arquivo JSON", type=['json'])
+            
+            if arquivo and st.button("📥 Importar Dados", use_container_width=True):
+                try:
+                    dados_json = arquivo.read().decode('utf-8')
+                    total = importar_dados_json(dados_json)
+                    st.success(f"✅ {total} clientes importados com sucesso!")
+                    st.balloons()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Erro ao importar: {e}")
+
+# ====================================================================
+# RODAPÉ
+# ====================================================================
+st.sidebar.markdown("---")
+st.sidebar.caption("💾 Dados salvos localmente")
+st.sidebar.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
