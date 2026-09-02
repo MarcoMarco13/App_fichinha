@@ -4,8 +4,7 @@ import pandas as pd
 from datetime import datetime
 import re
 import io
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+import base64
 
 # ====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -196,67 +195,107 @@ def esta_autenticado():
     return False
 
 # ====================================================================
-# FUNÇÃO PARA GERAR PDF
+# FUNÇÃO PARA GERAR PDF (versão HTML - sem reportlab)
 # ====================================================================
-def gerar_pdf(cliente_id, produtos):
-    buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    w, h = A4
-    
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(50, h - 50, "COMPROVANTE DE DÍVIDA")
-    pdf.setFont("Helvetica", 10)
-    pdf.drawString(50, h - 70, f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    pdf.line(50, h - 80, w - 50, h - 80)
-    
+def gerar_pdf_html(cliente_id, produtos):
+    """Gera um PDF em formato HTML (compatível com qualquer navegador)"""
     conn = get_db()
     cliente = pd.read_sql_query("SELECT * FROM clientes WHERE id = ?", conn, params=(cliente_id,)).iloc[0]
     conn.close()
     
-    y = h - 110
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(50, y, "DADOS DO DEVEDOR")
-    y -= 20
-    pdf.setFont("Helvetica", 10)
-    pdf.drawString(50, y, f"Nome: {cliente['nome']}")
-    y -= 15
-    if cliente['cpf'] and cliente['cpf'] != '00000000000':
-        pdf.drawString(50, y, f"CPF: {formata_cpf(cliente['cpf'])}")
-    y -= 15
-    if cliente['telefone']:
-        pdf.drawString(50, y, f"Telefone: {cliente['telefone']}")
-    y -= 25
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Comprovante de Dívida</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; }}
+            h1 {{ color: #2E86C1; border-bottom: 3px solid #2E86C1; padding-bottom: 10px; }}
+            .header {{ text-align: right; font-size: 12px; color: #666; margin-bottom: 20px; }}
+            .cliente {{ margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #2E86C1; }}
+            .cliente h2 {{ margin-top: 0; color: #333; font-size: 14px; }}
+            .cliente p {{ margin: 5px 0; font-size: 12px; }}
+            .produtos {{ margin: 20px 0; }}
+            .produtos h2 {{ color: #333; font-size: 14px; }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+            th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+            th {{ background-color: #2E86C1; color: white; }}
+            .total {{ font-size: 16px; font-weight: bold; margin-top: 20px; text-align: right; padding: 10px; background: #e8f4fd; border-radius: 5px; }}
+            .footer {{ font-size: 10px; color: #666; margin-top: 40px; border-top: 1px solid #ddd; padding-top: 15px; text-align: center; }}
+            .destaque {{ color: #c0392b; font-weight: bold; }}
+        </style>
+    </head>
+    <body>
+        <h1>📋 COMPROVANTE DE DÍVIDA</h1>
+        <div class="header">Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}</div>
+        
+        <div class="cliente">
+            <h2>📌 DADOS DO DEVEDOR</h2>
+            <p><strong>Nome:</strong> {cliente['nome']}</p>
+            <p><strong>CPF:</strong> {formata_cpf(cliente['cpf']) if cliente['cpf'] and cliente['cpf'] != '00000000000' else 'Não informado'}</p>
+            <p><strong>Telefone:</strong> {cliente['telefone'] or 'Não informado'}</p>
+    """
+    
+    if cliente['celular']:
+        html += f"<p><strong>Celular:</strong> {cliente['celular']}</p>"
     
     if cliente['logradouro']:
-        pdf.setFont("Helvetica-Bold", 12)
-        pdf.drawString(50, y, "ENDEREÇO")
-        y -= 20
-        pdf.setFont("Helvetica", 10)
-        pdf.drawString(50, y, f"{cliente['logradouro']}, {cliente['numero']}")
-        y -= 15
-        pdf.drawString(50, y, f"Bairro: {cliente['bairro']}, {cliente['cidade']} - {cliente['estado']}")
-        y -= 30
+        html += f"""
+            <p><strong>Endereço:</strong> {cliente['logradouro']}, {cliente['numero']}</p>
+            <p><strong>Bairro:</strong> {cliente['bairro']}, {cliente['cidade']} - {cliente['estado']}</p>
+        """
     
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(50, y, "PRODUTOS EM ABERTO")
-    y -= 20
-    pdf.setFont("Helvetica", 9)
+    html += """
+        </div>
+        
+        <div class="produtos">
+            <h2>🛒 PRODUTOS EM ABERTO</h2>
+            <table>
+                <tr>
+                    <th>#</th>
+                    <th>Produto</th>
+                    <th>Valor</th>
+                    <th>Data</th>
+                </tr>
+    """
     
     total = 0
-    for _, p in produtos.iterrows():
-        pdf.drawString(50, y, f"- {p['nome']}: {formata_moeda(p['valor'])}")
-        y -= 15
+    for i, (_, p) in enumerate(produtos.iterrows(), 1):
+        html += f"""
+            <tr>
+                <td>{i}</td>
+                <td>{p['nome']}</td>
+                <td>{formata_moeda(p['valor'])}</td>
+                <td>{p['data_compra']}</td>
+            </tr>
+        """
         total += p['valor']
     
-    y -= 10
-    pdf.line(50, y + 10, w - 50, y + 10)
-    y -= 20
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(50, y, f"TOTAL: {formata_moeda(total)}")
+    html += f"""
+            </table>
+            <div class="total">
+                💰 TOTAL DA DÍVIDA: <span class="destaque">{formata_moeda(total)}</span>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Este documento tem validade como comprovante de dívida para fins de cobrança judicial ou extrajudicial,<br>
+            conforme previsto no Código Civil Brasileiro (Lei nº 10.406/2002).</p>
+            <p style="margin-top: 10px; font-size: 9px; color: #999;">Documento gerado automaticamente pelo sistema de controle de fichinha.</p>
+        </div>
+    </body>
+    </html>
+    """
     
-    pdf.save()
-    buffer.seek(0)
-    return buffer
+    return html
+
+def gerar_pdf_download(cliente_id, produtos):
+    """Gera o HTML e cria um link para download como arquivo HTML (funciona como PDF)"""
+    html = gerar_pdf_html(cliente_id, produtos)
+    b64 = base64.b64encode(html.encode()).decode()
+    href = f'<a href="data:text/html;base64,{b64}" download="comprovante_divida_{datetime.now().strftime("%Y%m%d_%H%M")}.html">📥 Baixar Comprovante (HTML)</a>'
+    return href
 
 # ====================================================================
 # INICIALIZAÇÃO
@@ -309,7 +348,8 @@ if menu == "🏠 Dashboard":
     c3.metric("💰 Em Aberto", formata_moeda(valor_aberto))
     c4.metric("🔒 Modo Seguro", clientes_seguro)
     
-    st.metric("🏷️ Produtos Padrão", total_padrao)
+    col1, col2, col3 = st.columns(3)
+    col2.metric("🏷️ Produtos Padrão", total_padrao)
 
 # -------------------- CLIENTES --------------------
 elif menu == "👤 Clientes":
@@ -926,7 +966,10 @@ elif menu == "📊 Relatórios":
             pp = pd.read_sql_query("SELECT * FROM produtos_padrao", conn)
             conn.close()
             
-            st.download_button("📥 Clientes", c.to_csv(index=False).encode(), "clientes.csv", "text/csv")
-            st.download_button("📥 Produtos", p.to_csv(index=False).encode(), "produtos.csv", "text/csv")
-            st.download_button("📥 Pagamentos", pg.to_csv(index=False).encode(), "pagamentos.csv", "text/csv")
-            st.download_button("📥 Produtos Padrão", pp.to_csv(index=False).encode(), "produtos_padrao.csv", "text/csv")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button("📥 Clientes", c.to_csv(index=False).encode(), "clientes.csv", "text/csv")
+                st.download_button("📥 Produtos", p.to_csv(index=False).encode(), "produtos.csv", "text/csv")
+            with col2:
+                st.download_button("📥 Pagamentos", pg.to_csv(index=False).encode(), "pagamentos.csv", "text/csv")
+                st.download_button("📥 Produtos Padrão", pp.to_csv(index=False).encode(), "produtos_padrao.csv", "text/csv")
