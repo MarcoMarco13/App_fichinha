@@ -1,15 +1,30 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 from datetime import datetime
 import re
 import json
 import base64
+from supabase import create_client, Client
+import time
 
 # ====================================================================
 # CONFIGURAÇÃO INICIAL
 # ====================================================================
 st.set_page_config(page_title="Controle de Fichinha", page_icon="📋", layout="wide")
+
+# ====================================================================
+# CONFIGURAÇÃO SUPABASE
+# ====================================================================
+SUPABASE_URL = "https://ffbhtykclphnbarvyyts.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZmYmh0eWtjbHBobmJhcnZ5eXRzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg1MDAyNjcsImV4cCI6MjEwNDA3NjI2N30.LHPs8_LH8dTIXbcW21BaoxHaknZPvHyza2NdjZIVwjo"
+
+# Cache da conexão Supabase (reutiliza a mesma conexão)
+@st.cache_resource(ttl=3600)
+def get_supabase():
+    """Retorna uma única instância do cliente Supabase"""
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+supabase = get_supabase()
 
 # ====================================================================
 # CONSTANTES
@@ -40,6 +55,8 @@ if 'logado' not in st.session_state:
     st.session_state.logado = False
 if 'usuario' not in st.session_state:
     st.session_state.usuario = None
+if 'cache_timestamp' not in st.session_state:
+    st.session_state.cache_timestamp = None
 
 # ====================================================================
 # FUNÇÕES DE AUTENTICAÇÃO
@@ -57,6 +74,7 @@ def fazer_login(usuario, senha):
 def fazer_logout():
     st.session_state.logado = False
     st.session_state.usuario = None
+    st.cache_data.clear()
     st.rerun()
 
 def tela_login():
@@ -79,278 +97,386 @@ def tela_login():
     st.caption("🔒 Sistema protegido | Acesso restrito")
 
 # ====================================================================
-# FUNÇÕES DE BANCO DE DADOS
+# FUNÇÕES DE BANCO DE DADOS COM CACHE
 # ====================================================================
-def get_db():
-    return sqlite3.connect('fichinha.db')
 
-def query_to_list(query, params=None):
-    conn = get_db()
-    c = conn.cursor()
-    if params:
-        c.execute(query, params)
-    else:
-        c.execute(query)
-    colunas = [descricao[0] for descricao in c.description] if c.description else []
-    resultados = []
-    for row in c.fetchall():
-        resultados.append(dict(zip(colunas, row)))
-    conn.close()
-    return resultados
+CACHE_TTL = 60
+CACHE_LONGO = 300
 
-def query_to_dict(query, params=None):
-    resultados = query_to_list(query, params)
-    return resultados[0] if resultados else None
+@st.cache_data(ttl=CACHE_TTL)
+def query_to_list_cached(table, columns="*", filters=None, order=None):
+    """Versão com cache da função query_to_list"""
+    try:
+        query = supabase.table(table).select(columns)
+        
+        if filters:
+            for column, value in filters.items():
+                if value is not None:
+                    query = query.eq(column, value)
+        
+        if order:
+            if isinstance(order, dict):
+                query = query.order(order.get('column'), desc=order.get('desc', True))
+            else:
+                query = query.order(order, desc=True)
+        
+        response = query.execute()
+        
+        if response and hasattr(response, 'data'):
+            return response.data if response.data else []
+        return []
+        
+    except Exception as e:
+        st.error(f"Erro ao buscar dados da tabela {table}: {e}")
+        return []
+    
+@st.cache_data(ttl=CACHE_TTL)
+def query_to_dict_cached(table, columns="*", filters=None):
+    """Versão com cache da função query_to_dict"""
+    results = query_to_list_cached(table, columns, filters)
+    return results[0] if results else None
 
-def execute_query(query, params=None):
-    conn = get_db()
-    c = conn.cursor()
-    if params:
-        c.execute(query, params)
-    else:
-        c.execute(query)
-    conn.commit()
-    conn.close()
+def query_to_list(table, columns="*", filters=None, order=None):
+    return query_to_list_cached(table, columns, filters, order)
 
-def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS clientes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
-            telefone TEXT,
-            data_cadastro TEXT,
-            modo_seguro INTEGER DEFAULT 0,
-            cpf TEXT,
-            rg TEXT,
-            data_nascimento TEXT,
-            email TEXT,
-            celular TEXT,
-            logradouro TEXT,
-            numero TEXT,
-            complemento TEXT,
-            bairro TEXT,
-            cidade TEXT,
-            estado TEXT,
-            cep TEXT,
-            aceite_lgpd INTEGER DEFAULT 0,
-            data_aceite_lgpd TEXT,
-            observacoes TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS produtos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cliente_id INTEGER,
-            nome TEXT NOT NULL,
-            valor REAL NOT NULL,
-            data_compra TEXT,
-            pago INTEGER DEFAULT 0,
-            tipo_pagamento TEXT,
-            data_pagamento TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS pagamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cliente_id INTEGER,
-            valor REAL NOT NULL,
-            tipo TEXT,
-            data_pagamento TEXT,
-            descricao TEXT
-        )
-    ''')
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS produtos_padrao (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL UNIQUE,
-            valor REAL NOT NULL,
-            data_cadastro TEXT
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    migrar_banco()
+def query_to_dict(table, columns="*", filters=None):
+    return query_to_dict_cached(table, columns, filters)
 
-def migrar_banco():
-    conn = get_db()
-    c = conn.cursor()
+def insert_data(table, data):
+    try:
+        response = supabase.table(table).insert(data).execute()
+        if response.data:
+            st.cache_data.clear()
+            return response.data[0]
+        return None
+    except Exception as e:
+        st.error(f"Erro ao inserir dados na tabela {table}: {e}")
+        return None
+
+def update_data(table, data, filters):
+    try:
+        query = supabase.table(table).update(data)
+        for column, value in filters.items():
+            query = query.eq(column, value)
+        response = query.execute()
+        if response.data:
+            st.cache_data.clear()
+            return response.data[0]
+        return None
+    except Exception as e:
+        st.error(f"Erro ao atualizar dados na tabela {table}: {e}")
+        return None
+
+def delete_data(table, filters):
+    try:
+        query = supabase.table(table).delete()
+        for column, value in filters.items():
+            query = query.eq(column, value)
+        response = query.execute()
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao deletar dados da tabela {table}: {e}")
+        return False
+
+# ====================================================================
+# FUNÇÕES DE LIMITE DE CRÉDITO (NOVAS)
+# ====================================================================
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_limite_cliente(cliente_id):
+    """Retorna o limite de crédito do cliente"""
+    cliente = query_to_dict_cached("clientes", "limite_credito, bloqueado, motivo_bloqueio", {"id": cliente_id})
+    if cliente:
+        return {
+            'limite': float(cliente.get('limite_credito', 999999.99)),
+            'bloqueado': cliente.get('bloqueado', False),
+            'motivo': cliente.get('motivo_bloqueio', '')
+        }
+    return {'limite': 999999.99, 'bloqueado': False, 'motivo': ''}
+
+@st.cache_data(ttl=CACHE_TTL)
+def verificar_pode_comprar(cliente_id, valor_produto):
+    """Verifica se o cliente pode comprar baseado no limite"""
+    info = get_limite_cliente(cliente_id)
     
-    c.execute("PRAGMA table_info(clientes)")
-    colunas = [col[1] for col in c.fetchall()]
+    if info['bloqueado']:
+        return {'pode': False, 'motivo': f"🚫 Cliente BLOQUEADO! Motivo: {info['motivo'] or 'Não informado'}"}
     
-    colunas_necessarias = ['cpf', 'rg', 'data_nascimento', 'email', 'celular', 
-                          'logradouro', 'numero', 'complemento', 'bairro', 'cidade', 
-                          'estado', 'cep', 'modo_seguro', 'aceite_lgpd', 'data_aceite_lgpd', 'observacoes']
+    saldo_atual = calcula_saldo(cliente_id)
     
-    for col in colunas_necessarias:
-        if col not in colunas:
-            tipo = "INTEGER DEFAULT 0" if col in ['modo_seguro', 'aceite_lgpd'] else "TEXT"
-            try:
-                c.execute(f"ALTER TABLE clientes ADD COLUMN {col} {tipo}")
-            except:
-                pass
+    if saldo_atual + valor_produto > info['limite']:
+        return {
+            'pode': False, 
+            'motivo': f"⚠️ Limite excedido! Saldo atual: {formata_moeda(saldo_atual)} + R$ {valor_produto:.2f} > Limite: {formata_moeda(info['limite'])}"
+        }
     
-    conn.commit()
-    conn.close()
+    return {'pode': True, 'motivo': ''}
+
+def atualizar_limite_cliente(cliente_id, limite, bloqueado=False, motivo_bloqueio=''):
+    """Atualiza o limite de crédito do cliente"""
+    dados = {
+        'limite_credito': limite,
+        'bloqueado': bloqueado,
+        'motivo_bloqueio': motivo_bloqueio if bloqueado else None
+    }
+    return update_data("clientes", dados, {"id": cliente_id})
+
+# ====================================================================
+# FUNÇÕES DE CONSULTA OTIMIZADAS COM CACHE
+# ====================================================================
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_all_clientes():
+    """Busca todos os clientes (cacheado)"""
+    return query_to_list_cached("clientes", order={"column": "nome", "desc": False})
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_all_produtos_nao_pagos():
+    """Busca todos os produtos não pagos (cacheado) - INCLUI cliente_id"""
+    return query_to_list_cached("produtos", "id, cliente_id, valor", {"pago": False})
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_produtos_nao_pagos_cliente(cliente_id):
+    """Busca produtos não pagos de um cliente (cacheado)"""
+    return query_to_list_cached(
+        "produtos", 
+        "id, nome, valor, data_compra", 
+        {"cliente_id": cliente_id, "pago": False}
+    )
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_all_produtos_padrao():
+    """Busca todos os produtos padrão (cacheado)"""
+    return query_to_list_cached("produtos_padrao", order={"column": "nome", "desc": False})
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_saldos_todos_clientes():
+    """Calcula saldo de todos os clientes em uma única query (cacheado)"""
+    produtos = get_all_produtos_nao_pagos()
+    saldos = {}
+    
+    if produtos and isinstance(produtos, list):
+        for p in produtos:
+            if isinstance(p, dict) and 'cliente_id' in p:
+                cliente_id = p['cliente_id']
+                saldos[cliente_id] = saldos.get(cliente_id, 0) + float(p.get('valor', 0))
+    
+    return saldos
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_clientes_com_saldo():
+    """Retorna clientes com saldo calculado (cacheado)"""
+    clientes = get_all_clientes()
+    saldos = get_saldos_todos_clientes()
+    
+    resultado = []
+    if clientes and isinstance(clientes, list):
+        for cliente in clientes:
+            if isinstance(cliente, dict):
+                cliente_id = cliente.get('id')
+                saldo = saldos.get(cliente_id, 0.0) if cliente_id else 0.0
+                resultado.append({
+                    **cliente,
+                    'saldo': saldo,
+                    'qtd_produtos': 0
+                })
+    
+    return resultado
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_historico_pagamentos(cliente_id, limit=30):
+    """Busca histórico de pagamentos (cacheado)"""
+    if not cliente_id:
+        return []
+    return query_to_list_cached(
+        "pagamentos",
+        "valor, tipo, data_pagamento, descricao",
+        {"cliente_id": cliente_id},
+        {"column": "id", "desc": True}
+    )[:limit]
+
+@st.cache_data(ttl=CACHE_LONGO)
+def get_produtos_padrao_simples():
+    """Busca produtos padrão para dropdown (cache longo)"""
+    return query_to_list_cached("produtos_padrao", "id, nome, valor", order={"column": "nome", "desc": False})
 
 # ====================================================================
 # FUNÇÕES DE EDIÇÃO
 # ====================================================================
 def editar_cliente(cliente_id, dados_atualizados):
-    """Edita os dados de um cliente (exceto valor financeiro)"""
-    conn = get_db()
-    c = conn.cursor()
-    
-    c.execute('''
-        UPDATE clientes SET
-            nome = ?,
-            telefone = ?,
-            cpf = ?,
-            rg = ?,
-            data_nascimento = ?,
-            email = ?,
-            celular = ?,
-            logradouro = ?,
-            numero = ?,
-            complemento = ?,
-            bairro = ?,
-            cidade = ?,
-            estado = ?,
-            cep = ?,
-            observacoes = ?
-        WHERE id = ?
-    ''', (
-        dados_atualizados['nome'],
-        dados_atualizados['telefone'],
-        dados_atualizados['cpf'],
-        dados_atualizados['rg'],
-        dados_atualizados['data_nascimento'],
-        dados_atualizados['email'],
-        dados_atualizados['celular'],
-        dados_atualizados['logradouro'],
-        dados_atualizados['numero'],
-        dados_atualizados['complemento'],
-        dados_atualizados['bairro'],
-        dados_atualizados['cidade'],
-        dados_atualizados['estado'],
-        dados_atualizados['cep'],
-        dados_atualizados['observacoes'],
-        cliente_id
-    ))
-    
-    conn.commit()
-    conn.close()
-    return True
+    return update_data("clientes", dados_atualizados, {"id": cliente_id})
 
 def editar_produto_padrao(produto_id, novo_nome):
-    """Edita o nome de um produto padrão (valor NÃO pode ser alterado)"""
-    conn = get_db()
-    c = conn.cursor()
-    
-    c.execute("SELECT id FROM produtos_padrao WHERE id = ?", (produto_id,))
-    if not c.fetchone():
-        conn.close()
-        return False
-    
-    c.execute('''
-        UPDATE produtos_padrao SET nome = ? WHERE id = ?
-    ''', (novo_nome, produto_id))
-    
-    conn.commit()
-    conn.close()
-    return True
+    return update_data("produtos_padrao", {"nome": novo_nome}, {"id": produto_id})
 
 # ====================================================================
 # FUNÇÕES DE SINCRONIZAÇÃO
 # ====================================================================
 def exportar_dados_json():
-    conn = get_db()
-    clientes = pd.read_sql_query("SELECT * FROM clientes", conn)
-    produtos = pd.read_sql_query("SELECT * FROM produtos", conn)
-    pagamentos = pd.read_sql_query("SELECT * FROM pagamentos", conn)
-    produtos_padrao = pd.read_sql_query("SELECT * FROM produtos_padrao", conn)
-    conn.close()
+    clientes = query_to_list_cached("clientes")
+    produtos = query_to_list_cached("produtos")
+    pagamentos = query_to_list_cached("pagamentos")
+    produtos_padrao = query_to_list_cached("produtos_padrao")
     
     dados = {
-        'clientes': clientes.to_dict('records'),
-        'produtos': produtos.to_dict('records'),
-        'pagamentos': pagamentos.to_dict('records'),
-        'produtos_padrao': produtos_padrao.to_dict('records'),
+        'clientes': clientes,
+        'produtos': produtos,
+        'pagamentos': pagamentos,
+        'produtos_padrao': produtos_padrao,
         'data_exportacao': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'versao': '1.0'
     }
     return json.dumps(dados, default=str, ensure_ascii=False)
 
 def importar_dados_json(json_data):
-    dados = json.loads(json_data)
-    conn = get_db()
-    c = conn.cursor()
-    
-    c.execute("DELETE FROM clientes")
-    c.execute("DELETE FROM produtos")
-    c.execute("DELETE FROM pagamentos")
-    c.execute("DELETE FROM produtos_padrao")
-    
-    for cliente in dados['clientes']:
-        c.execute('''
-            INSERT INTO clientes 
-            (id, nome, telefone, data_cadastro, modo_seguro, cpf, rg, data_nascimento, 
-             email, celular, logradouro, numero, complemento, bairro, cidade, estado, cep,
-             aceite_lgpd, data_aceite_lgpd, observacoes) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            cliente['id'], cliente['nome'], cliente['telefone'], cliente['data_cadastro'],
-            cliente['modo_seguro'], cliente['cpf'], cliente['rg'], cliente['data_nascimento'],
-            cliente['email'], cliente['celular'], cliente['logradouro'], cliente['numero'],
-            cliente['complemento'], cliente['bairro'], cliente['cidade'], cliente['estado'],
-            cliente['cep'], cliente['aceite_lgpd'], cliente['data_aceite_lgpd'], cliente['observacoes']
-        ))
-    
-    for produto in dados['produtos']:
-        c.execute('''
-            INSERT INTO produtos 
-            (id, cliente_id, nome, valor, data_compra, pago, tipo_pagamento, data_pagamento) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            produto['id'], produto['cliente_id'], produto['nome'], produto['valor'],
-            produto['data_compra'], produto['pago'], produto['tipo_pagamento'], produto['data_pagamento']
-        ))
-    
-    for pagamento in dados['pagamentos']:
-        c.execute('''
-            INSERT INTO pagamentos 
-            (id, cliente_id, valor, tipo, data_pagamento, descricao) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            pagamento['id'], pagamento['cliente_id'], pagamento['valor'],
-            pagamento['tipo'], pagamento['data_pagamento'], pagamento['descricao']
-        ))
-    
-    for produto_padrao in dados['produtos_padrao']:
-        c.execute('''
-            INSERT INTO produtos_padrao 
-            (id, nome, valor, data_cadastro) 
-            VALUES (?, ?, ?, ?)
-        ''', (
-            produto_padrao['id'], produto_padrao['nome'], 
-            produto_padrao['valor'], produto_padrao['data_cadastro']
-        ))
-    
-    conn.commit()
-    conn.close()
-    return len(dados['clientes'])
+    try:
+        dados = json.loads(json_data)
+        
+        if 'clientes' not in dados or not dados['clientes']:
+            st.error("❌ Nenhum cliente encontrado no JSON")
+            return 0
+        
+        st.info(f"📥 Iniciando importação de {len(dados['clientes'])} clientes e {len(dados.get('produtos', []))} produtos...")
+        
+        mapa_ids = {}
+        total_clientes = 0
+        
+        for cliente in dados['clientes']:
+            try:
+                id_antigo = cliente.get('id')
+                
+                cliente_data = {
+                    'nome': cliente.get('nome', ''),
+                    'telefone': cliente.get('telefone', '0'),
+                    'data_cadastro': cliente.get('data_cadastro'),
+                    'modo_seguro': bool(cliente.get('modo_seguro', 0)),
+                    'cpf': cliente.get('cpf'),
+                    'rg': cliente.get('rg'),
+                    'data_nascimento': cliente.get('data_nascimento'),
+                    'email': cliente.get('email'),
+                    'celular': cliente.get('celular'),
+                    'logradouro': cliente.get('logradouro'),
+                    'numero': cliente.get('numero'),
+                    'complemento': cliente.get('complemento'),
+                    'bairro': cliente.get('bairro'),
+                    'cidade': cliente.get('cidade'),
+                    'estado': cliente.get('estado'),
+                    'cep': cliente.get('cep'),
+                    'aceite_lgpd': bool(cliente.get('aceite_lgpd', 0)),
+                    'data_aceite_lgpd': cliente.get('data_aceite_lgpd'),
+                    'observacoes': cliente.get('observacoes'),
+                    'limite_credito': cliente.get('limite_credito', 999999.99),
+                    'bloqueado': bool(cliente.get('bloqueado', 0)),
+                    'motivo_bloqueio': cliente.get('motivo_bloqueio')
+                }
+                
+                cliente_data = {k: v for k, v in cliente_data.items() if v is not None}
+                result = insert_data("clientes", cliente_data)
+                
+                if result:
+                    mapa_ids[id_antigo] = result['id']
+                    total_clientes += 1
+                    st.success(f"✅ Cliente '{cliente.get('nome')}' (ID {id_antigo} -> {result['id']})")
+                else:
+                    st.warning(f"⚠️ Falha ao importar cliente '{cliente.get('nome')}'")
+                    
+            except Exception as e:
+                st.warning(f"⚠️ Erro no cliente {cliente.get('nome', 'desconhecido')}: {e}")
+        
+        total_produtos = 0
+        
+        if 'produtos' in dados and dados['produtos']:
+            for produto in dados['produtos']:
+                try:
+                    cliente_id_antigo = produto.get('cliente_id')
+                    
+                    if cliente_id_antigo in mapa_ids:
+                        produto_data = {
+                            'cliente_id': mapa_ids[cliente_id_antigo],
+                            'nome': produto.get('nome', ''),
+                            'valor': float(produto.get('valor', 0)),
+                            'data_compra': produto.get('data_compra'),
+                            'pago': bool(produto.get('pago', 0)),
+                            'tipo_pagamento': produto.get('tipo_pagamento'),
+                            'data_pagamento': produto.get('data_pagamento')
+                        }
+                        
+                        produto_data = {k: v for k, v in produto_data.items() if v is not None}
+                        result = insert_data("produtos", produto_data)
+                        
+                        if result:
+                            total_produtos += 1
+                    else:
+                        st.warning(f"⚠️ Produto '{produto.get('nome')}' ignorado - Cliente ID {cliente_id_antigo} não encontrado")
+                        
+                except Exception as e:
+                    st.warning(f"⚠️ Erro no produto '{produto.get('nome', 'desconhecido')}': {e}")
+        
+        if 'pagamentos' in dados and dados['pagamentos']:
+            for pagamento in dados['pagamentos']:
+                try:
+                    cliente_id_antigo = pagamento.get('cliente_id')
+                    
+                    if cliente_id_antigo in mapa_ids:
+                        pagamento_data = {
+                            'cliente_id': mapa_ids[cliente_id_antigo],
+                            'valor': float(pagamento.get('valor', 0)),
+                            'tipo': pagamento.get('tipo', 'dinheiro'),
+                            'data_pagamento': pagamento.get('data_pagamento'),
+                            'descricao': pagamento.get('descricao', '')
+                        }
+                        
+                        pagamento_data = {k: v for k, v in pagamento_data.items() if v is not None}
+                        insert_data("pagamentos", pagamento_data)
+                        
+                except Exception as e:
+                    st.warning(f"⚠️ Erro no pagamento: {e}")
+        
+        if 'produtos_padrao' in dados and dados['produtos_padrao']:
+            for produto in dados['produtos_padrao']:
+                try:
+                    produto_data = {
+                        'nome': produto.get('nome', ''),
+                        'valor': float(produto.get('valor', 0)),
+                        'data_cadastro': produto.get('data_cadastro')
+                    }
+                    
+                    produto_data = {k: v for k, v in produto_data.items() if v is not None}
+                    insert_data("produtos_padrao", produto_data)
+                    
+                except Exception as e:
+                    st.warning(f"⚠️ Erro no produto padrão: {e}")
+        
+        st.cache_data.clear()
+        
+        st.success(f"""
+        ✅ **IMPORTAÇÃO CONCLUÍDA!**
+        
+        - 👤 {total_clientes} clientes importados
+        - 📦 {total_produtos} produtos importados
+        - 🔗 {len(mapa_ids)} relacionamentos mantidos
+        """)
+        
+        if total_clientes > 0:
+            st.balloons()
+        
+        return total_clientes
+        
+    except json.JSONDecodeError as e:
+        st.error(f"❌ Erro ao decodificar JSON: {e}")
+        return 0
+    except Exception as e:
+        st.error(f"❌ Erro geral na importação: {e}")
+        st.exception(e)
+        return 0
 
 # ====================================================================
 # FUNÇÕES DE VALIDAÇÃO E FORMATAÇÃO
 # ====================================================================
 def valida_cpf(cpf):
+    if not cpf:
+        return False
     cpf = re.sub(r'[^0-9]', '', cpf)
     if len(cpf) != 11 or len(set(cpf)) == 1:
         return False
@@ -364,20 +490,22 @@ def valida_cpf(cpf):
     return True
 
 def formata_cpf(cpf):
+    if not cpf:
+        return "Não informado"
     cpf = re.sub(r'[^0-9]', '', cpf)
     if len(cpf) == 11:
         return f"{cpf[:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:]}"
     return cpf
 
 def formata_moeda(valor):
+    if valor is None:
+        return "R$ 0,00"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
+@st.cache_data(ttl=CACHE_TTL)
 def calcula_saldo(cliente_id):
-    result = query_to_dict(
-        "SELECT SUM(valor) as total FROM produtos WHERE cliente_id = ? AND pago = 0",
-        (cliente_id,)
-    )
-    return result['total'] if result and result['total'] else 0.0
+    saldos = get_saldos_todos_clientes()
+    return saldos.get(cliente_id, 0.0)
 
 def autentica(senha):
     if senha == SENHA_GERENTE:
@@ -402,7 +530,7 @@ def esta_autenticado():
 # FUNÇÃO PARA GERAR COMPROVANTE (HTML)
 # ====================================================================
 def gerar_comprovante_html(cliente_id, produtos):
-    cliente = query_to_dict("SELECT * FROM clientes WHERE id = ?", (cliente_id,))
+    cliente = query_to_dict_cached("clientes", filters={"id": cliente_id})
     if not cliente:
         return None
     
@@ -435,9 +563,9 @@ def gerar_comprovante_html(cliente_id, produtos):
         
         <div class="cliente">
             <h2>📌 DADOS DO DEVEDOR</h2>
-            <p><strong>Nome:</strong> {cliente['nome']}</p>
-            <p><strong>CPF:</strong> {formata_cpf(cliente['cpf']) if cliente['cpf'] and cliente['cpf'] != '00000000000' else 'Não informado'}</p>
-            <p><strong>Telefone:</strong> {cliente['telefone'] or 'Não informado'}</p>
+            <p><strong>Nome:</strong> {cliente.get('nome', '')}</p>
+            <p><strong>CPF:</strong> {formata_cpf(cliente.get('cpf'))}</p>
+            <p><strong>Telefone:</strong> {cliente.get('telefone') or 'Não informado'}</p>
     """
     
     if cliente.get('celular'):
@@ -445,8 +573,8 @@ def gerar_comprovante_html(cliente_id, produtos):
     
     if cliente.get('logradouro'):
         html += f"""
-            <p><strong>Endereço:</strong> {cliente['logradouro']}, {cliente['numero']}</p>
-            <p><strong>Bairro:</strong> {cliente['bairro']}, {cliente['cidade']} - {cliente['estado']}</p>
+            <p><strong>Endereço:</strong> {cliente['logradouro']}, {cliente.get('numero', '')}</p>
+            <p><strong>Bairro:</strong> {cliente.get('bairro', '')}, {cliente.get('cidade', '')} - {cliente.get('estado', '')}</p>
         """
     
     html += """
@@ -468,12 +596,12 @@ def gerar_comprovante_html(cliente_id, produtos):
         html += f"""
             <tr>
                 <td>{i}</td>
-                <td>{p['nome']}</td>
-                <td>{formata_moeda(p['valor'])}</td>
-                <td>{p['data_compra']}</td>
+                <td>{p.get('nome', '')}</td>
+                <td>{formata_moeda(p.get('valor', 0))}</td>
+                <td>{p.get('data_compra', '')}</td>
             </tr>
         """
-        total += p['valor']
+        total += p.get('valor', 0)
     
     html += f"""
             </table>
@@ -492,9 +620,12 @@ def gerar_comprovante_html(cliente_id, produtos):
     return html
 
 # ====================================================================
-# INICIALIZAÇÃO
+# FUNÇÃO PARA LIMPAR CACHE MANUALMENTE
 # ====================================================================
-init_db()
+def limpar_cache():
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.success("✅ Cache limpo com sucesso!")
 
 # ====================================================================
 # VERIFICAR LOGIN
@@ -512,6 +643,10 @@ st.sidebar.markdown("---")
 
 if st.sidebar.button("🚪 Sair", use_container_width=True):
     fazer_logout()
+
+if st.sidebar.button("🔄 Limpar Cache", use_container_width=True):
+    limpar_cache()
+    st.rerun()
 
 menu = st.sidebar.radio(
     "Navegação",
@@ -539,17 +674,22 @@ st.sidebar.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 if menu == "🏠 Dashboard":
     st.title("🏠 Dashboard")
     
-    total_clientes = query_to_dict("SELECT COUNT(*) as total FROM clientes")['total'] or 0
-    total_pendentes = query_to_dict("SELECT COUNT(*) as total FROM produtos WHERE pago = 0")['total'] or 0
-    valor_aberto = query_to_dict("SELECT SUM(valor) as total FROM produtos WHERE pago = 0")['total'] or 0
-    clientes_seguro = query_to_dict("SELECT COUNT(*) as total FROM clientes WHERE modo_seguro = 1")['total'] or 0
-    total_padrao = query_to_dict("SELECT COUNT(*) as total FROM produtos_padrao")['total'] or 0
+    clientes_list = get_all_clientes()
+    produtos_nao_pagos = get_all_produtos_nao_pagos()
+    clientes_seguro = query_to_list_cached("clientes", "id", {"modo_seguro": True})
+    produtos_padrao = get_all_produtos_padrao()
+    
+    total_clientes = len(clientes_list)
+    total_pendentes = len(produtos_nao_pagos)
+    valor_aberto = sum(float(p.get('valor', 0)) for p in produtos_nao_pagos)
+    total_seguro = len(clientes_seguro)
+    total_padrao = len(produtos_padrao)
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("👤 Clientes", total_clientes)
     c2.metric("📝 Pendentes", total_pendentes)
     c3.metric("💰 Em Aberto", formata_moeda(valor_aberto))
-    c4.metric("🔒 Modo Seguro", clientes_seguro)
+    c4.metric("🔒 Modo Seguro", total_seguro)
     
     col1, col2, col3 = st.columns(3)
     col2.metric("🏷️ Produtos Padrão", total_padrao)
@@ -625,47 +765,68 @@ elif menu == "👤 Clientes":
                     for erro in erros:
                         st.error(f"❌ {erro}")
                 else:
-                    conn = get_db()
-                    c = conn.cursor()
-                    c.execute(
-                        """INSERT INTO clientes 
-                           (nome, telefone, data_cadastro, modo_seguro, cpf, rg, data_nascimento, 
-                            email, celular, logradouro, numero, complemento, bairro, cidade, estado, cep,
-                            aceite_lgpd, data_aceite_lgpd, observacoes) 
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (nome, telefone, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                         1 if st.session_state.modo_seguro else 0,
-                         cpf, rg, str(data_nasc) if data_nasc else None,
-                         email, celular, logradouro, numero, complemento, bairro, cidade, estado, cep,
-                         1 if aceite_lgpd else 0,
-                         datetime.now().strftime("%Y-%m-%d %H:%M:%S") if aceite_lgpd else None,
-                         observacoes)
-                    )
-                    conn.commit()
-                    conn.close()
-                    st.session_state.form_data = {}
-                    st.success(f"✅ Cliente cadastrado!")
-                    st.rerun()
+                    cliente_data = {
+                        'nome': nome,
+                        'telefone': telefone,
+                        'data_cadastro': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'modo_seguro': st.session_state.modo_seguro,
+                        'cpf': cpf,
+                        'rg': rg,
+                        'data_nascimento': str(data_nasc) if data_nasc else None,
+                        'email': email,
+                        'celular': celular,
+                        'logradouro': logradouro,
+                        'numero': numero,
+                        'complemento': complemento,
+                        'bairro': bairro,
+                        'cidade': cidade,
+                        'estado': estado,
+                        'cep': cep,
+                        'aceite_lgpd': aceite_lgpd,
+                        'data_aceite_lgpd': datetime.now().strftime("%Y-%m-%d %H:%M:%S") if aceite_lgpd else None,
+                        'observacoes': observacoes,
+                        'limite_credito': 999999.99,
+                        'bloqueado': False,
+                        'motivo_bloqueio': None
+                    }
+                    
+                    result = insert_data("clientes", cliente_data)
+                    if result:
+                        st.session_state.form_data = {}
+                        st.success(f"✅ Cliente cadastrado!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Erro ao cadastrar cliente")
     
     st.subheader("📋 Lista de Clientes")
-    clientes = query_to_list("""
-        SELECT c.id, c.nome, c.telefone, c.modo_seguro, c.cpf,
-               COUNT(p.id) as qtd_produtos,
-               SUM(CASE WHEN p.pago = 0 THEN p.valor ELSE 0 END) as saldo
-        FROM clientes c
-        LEFT JOIN produtos p ON c.id = p.cliente_id
-        GROUP BY c.id
-        ORDER BY c.id DESC
-    """)
     
-    if clientes:
-        df = pd.DataFrame(clientes)
-        df['saldo'] = df['saldo'].fillna(0)
+    clientes_com_saldo = get_clientes_com_saldo()
+    
+    if clientes_com_saldo:
+        df = pd.DataFrame(clientes_com_saldo)
         df['saldo_fmt'] = df['saldo'].apply(formata_moeda)
         df['modo'] = df['modo_seguro'].apply(lambda x: "🔒" if x else "📱")
+        
+        # Adicionar status baseado no limite e bloqueio
+        def get_status(row):
+            if row.get('bloqueado', False):
+                return "🚫 BLOQUEADO"
+            elif row.get('limite_credito', 999999.99) < 999999.99:
+                return f"💳 Limite: {formata_moeda(row.get('limite_credito', 0))}"
+            return "✅ Ativo"
+        
+        df['status'] = df.apply(get_status, axis=1)
+        
         st.dataframe(
-            df[['id', 'nome', 'telefone', 'saldo_fmt', 'modo']],
-            column_config={"id": "ID", "nome": "Nome", "telefone": "Telefone", "saldo_fmt": "Saldo", "modo": ""},
+            df[['id', 'nome', 'telefone', 'saldo_fmt', 'status', 'modo']],
+            column_config={
+                "id": "ID", 
+                "nome": "Nome", 
+                "telefone": "Telefone", 
+                "saldo_fmt": "Saldo",
+                "status": "Status",
+                "modo": ""
+            },
             use_container_width=True
         )
         
@@ -673,6 +834,8 @@ elif menu == "👤 Clientes":
         st.divider()
         st.subheader("✏️ Editar Cliente")
         st.caption("Edite os dados do cliente sem precisar apagar e recriar")
+        
+        clientes = get_all_clientes()
         
         cliente_editar = st.selectbox(
             "Selecione o cliente para editar",
@@ -682,7 +845,7 @@ elif menu == "👤 Clientes":
         )
         
         if cliente_editar:
-            cliente_dados = query_to_dict("SELECT * FROM clientes WHERE id = ?", (cliente_editar,))
+            cliente_dados = query_to_dict_cached("clientes", filters={"id": cliente_editar})
             
             if cliente_dados:
                 st.info(f"✏️ Editando: **{cliente_dados['nome']}**")
@@ -691,37 +854,71 @@ elif menu == "👤 Clientes":
                     with st.form("form_editar_cliente"):
                         col1, col2 = st.columns(2)
                         with col1:
-                            nome_edit = st.text_input("Nome*", value=cliente_dados['nome'] or '')
-                            telefone_edit = st.text_input("Telefone*", value=cliente_dados['telefone'] or '')
-                            cpf_edit = st.text_input("CPF", max_chars=11, value=cliente_dados['cpf'] or '')
-                            rg_edit = st.text_input("RG", value=cliente_dados['rg'] or '')
+                            nome_edit = st.text_input("Nome*", value=cliente_dados.get('nome') or '')
+                            telefone_edit = st.text_input("Telefone*", value=cliente_dados.get('telefone') or '')
+                            cpf_edit = st.text_input("CPF", max_chars=11, value=cliente_dados.get('cpf') or '')
+                            rg_edit = st.text_input("RG", value=cliente_dados.get('rg') or '')
                         with col2:
                             data_nasc_edit = st.date_input(
                                 "Data de Nascimento",
-                                value=datetime.strptime(cliente_dados['data_nascimento'], "%Y-%m-%d").date() if cliente_dados['data_nascimento'] else None
+                                value=datetime.strptime(cliente_dados['data_nascimento'], "%Y-%m-%d").date() if cliente_dados.get('data_nascimento') else None
                             )
-                            email_edit = st.text_input("Email", value=cliente_dados['email'] or '')
-                            celular_edit = st.text_input("Celular", value=cliente_dados['celular'] or '')
+                            email_edit = st.text_input("Email", value=cliente_dados.get('email') or '')
+                            celular_edit = st.text_input("Celular", value=cliente_dados.get('celular') or '')
                         
                         st.subheader("📍 Endereço")
                         col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            logradouro_edit = st.text_input("Logradouro", value=cliente_dados['logradouro'] or '')
+                            logradouro_edit = st.text_input("Logradouro", value=cliente_dados.get('logradouro') or '')
                         with col2:
-                            numero_edit = st.text_input("Número", value=cliente_dados['numero'] or '')
+                            numero_edit = st.text_input("Número", value=cliente_dados.get('numero') or '')
                         with col3:
-                            complemento_edit = st.text_input("Complemento", value=cliente_dados['complemento'] or '')
+                            complemento_edit = st.text_input("Complemento", value=cliente_dados.get('complemento') or '')
                         
                         col1, col2, col3 = st.columns([2, 2, 1])
                         with col1:
-                            bairro_edit = st.text_input("Bairro", value=cliente_dados['bairro'] or '')
+                            bairro_edit = st.text_input("Bairro", value=cliente_dados.get('bairro') or '')
                         with col2:
-                            cidade_edit = st.text_input("Cidade", value=cliente_dados['cidade'] or '')
+                            cidade_edit = st.text_input("Cidade", value=cliente_dados.get('cidade') or '')
                         with col3:
-                            estado_edit = st.text_input("UF", max_chars=2, value=cliente_dados['estado'] or '')
+                            estado_edit = st.text_input("UF", max_chars=2, value=cliente_dados.get('estado') or '')
                         
-                        cep_edit = st.text_input("CEP", max_chars=8, value=cliente_dados['cep'] or '')
-                        observacoes_edit = st.text_area("Observações", value=cliente_dados['observacoes'] or '')
+                        cep_edit = st.text_input("CEP", max_chars=8, value=cliente_dados.get('cep') or '')
+                        observacoes_edit = st.text_area("Observações", value=cliente_dados.get('observacoes') or '')
+                        
+                        # ========== NOVO: CONTROLE DE CRÉDITO ==========
+                        st.divider()
+                        st.subheader("💰 Controle de Crédito")
+                        st.caption("Defina um limite de crédito para este cliente")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            limite_edit = st.number_input(
+                                "Limite de Crédito (R$)",
+                                min_value=0.00,
+                                max_value=999999.99,
+                                value=float(cliente_dados.get('limite_credito', 999999.99)),
+                                step=50.00,
+                                format="%.2f",
+                                help="Valor máximo que o cliente pode dever. 999999.99 = sem limite"
+                            )
+                        
+                        with col2:
+                            bloqueado_edit = st.checkbox(
+                                "🚫 Bloquear Cliente",
+                                value=cliente_dados.get('bloqueado', False),
+                                help="Impede o cliente de fazer novas compras"
+                            )
+                        
+                        with col3:
+                            if bloqueado_edit:
+                                motivo_bloqueio_edit = st.text_input(
+                                    "Motivo do Bloqueio",
+                                    value=cliente_dados.get('motivo_bloqueio', ''),
+                                    placeholder="Ex: Inadimplente, Cheque devolvido..."
+                                )
+                            else:
+                                motivo_bloqueio_edit = ''
                         
                         st.warning("⚠️ **IMPORTANTE:** O valor financeiro (saldo, produtos, pagamentos) NÃO pode ser editado para evitar fraudes.")
                         
@@ -753,7 +950,10 @@ elif menu == "👤 Clientes":
                                     'cidade': cidade_edit if cidade_edit else None,
                                     'estado': estado_edit if estado_edit else None,
                                     'cep': cep_edit if cep_edit else None,
-                                    'observacoes': observacoes_edit if observacoes_edit else None
+                                    'observacoes': observacoes_edit if observacoes_edit else None,
+                                    'limite_credito': limite_edit,
+                                    'bloqueado': bloqueado_edit,
+                                    'motivo_bloqueio': motivo_bloqueio_edit if bloqueado_edit else None
                                 }
                                 
                                 if editar_cliente(cliente_editar, dados_atualizados):
@@ -789,7 +989,7 @@ elif menu == "👤 Clientes":
             
             if cliente_id:
                 nome_cliente = next(c['nome'] for c in clientes if c['id'] == cliente_id)
-                saldo = next(c['saldo'] for c in clientes if c['id'] == cliente_id)
+                saldo = next(c.get('saldo', 0) for c in clientes_com_saldo if c['id'] == cliente_id)
                 
                 if saldo > 0:
                     st.warning(f"⚠️ Cliente tem saldo de {formata_moeda(saldo)} pendente!")
@@ -798,9 +998,9 @@ elif menu == "👤 Clientes":
                 
                 if confirmar == nome_cliente:
                     if st.button("🗑️ EXCLUIR PERMANENTEMENTE", type="primary"):
-                        execute_query("DELETE FROM pagamentos WHERE cliente_id = ?", (cliente_id,))
-                        execute_query("DELETE FROM produtos WHERE cliente_id = ?", (cliente_id,))
-                        execute_query("DELETE FROM clientes WHERE id = ?", (cliente_id,))
+                        delete_data("pagamentos", {"cliente_id": cliente_id})
+                        delete_data("produtos", {"cliente_id": cliente_id})
+                        delete_data("clientes", {"id": cliente_id})
                         st.success(f"✅ Cliente excluído!")
                         st.rerun()
     else:
@@ -810,7 +1010,7 @@ elif menu == "👤 Clientes":
 elif menu == "📝 Nova Fichinha":
     st.title("📝 Nova Fichinha")
     
-    clientes = query_to_list("SELECT id, nome, modo_seguro FROM clientes ORDER BY nome")
+    clientes = get_all_clientes()
     
     if not clientes:
         st.warning("⚠️ Cadastre um cliente primeiro!")
@@ -822,8 +1022,30 @@ elif menu == "📝 Nova Fichinha":
         )
         
         if cliente_id:
+            # ========== VERIFICAR LIMITE E BLOQUEIO ==========
+            info_limite = get_limite_cliente(cliente_id)
+            
+            if info_limite['bloqueado']:
+                st.error(f"🚫 **CLIENTE BLOQUEADO!** Motivo: {info_limite['motivo'] or 'Não informado'}")
+                st.warning("Este cliente não pode fazer novas compras!")
+                st.stop()
+            
             saldo = calcula_saldo(cliente_id)
-            st.info(f"💰 Saldo atual: {formata_moeda(saldo)}")
+            limite = info_limite['limite']
+            
+            # Mostrar informações de limite
+            if limite < 999999.99:
+                disponivel = limite - saldo
+                st.info(f"💰 Saldo atual: {formata_moeda(saldo)} | 💳 Limite: {formata_moeda(limite)} | 📊 Disponível: {formata_moeda(disponivel)}")
+                
+                if saldo / limite > 0.8:
+                    st.warning(f"⚠️ ATENÇÃO: Saldo atual ({formata_moeda(saldo)}) está próximo do limite ({formata_moeda(limite)})!")
+                
+                if disponivel <= 0:
+                    st.error(f"❌ Limite esgotado! Saldo: {formata_moeda(saldo)} | Limite: {formata_moeda(limite)}")
+                    st.stop()
+            else:
+                st.info(f"💰 Saldo atual: {formata_moeda(saldo)} | ♾️ Sem limite definido")
             
             if next(c['modo_seguro'] for c in clientes if c['id'] == cliente_id):
                 st.warning("🔒 Cliente em Modo Seguro")
@@ -850,17 +1072,19 @@ elif menu == "📝 Nova Fichinha":
                         elif valor_padrao <= 0:
                             st.error("❌ Valor deve ser maior que zero")
                         else:
-                            try:
-                                execute_query(
-                                    "INSERT INTO produtos_padrao (nome, valor, data_cadastro) VALUES (?, ?, ?)",
-                                    (nome_padrao, valor_padrao, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                                )
+                            produto_data = {
+                                'nome': nome_padrao,
+                                'valor': valor_padrao,
+                                'data_cadastro': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            result = insert_data("produtos_padrao", produto_data)
+                            if result:
                                 st.success(f"✅ Produto '{nome_padrao}' cadastrado com sucesso!")
                                 st.rerun()
-                            except sqlite3.IntegrityError:
-                                st.error("❌ Produto já cadastrado!")
+                            else:
+                                st.error("❌ Erro ao cadastrar produto")
                 
-                produtos_padrao = query_to_list("SELECT id, nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome")
+                produtos_padrao = get_all_produtos_padrao()
                 
                 if produtos_padrao:
                     df_padrao = pd.DataFrame(produtos_padrao)
@@ -891,7 +1115,7 @@ elif menu == "📝 Nova Fichinha":
                             
                             if confirmar == nome_excluir:
                                 if st.button("🗑️ Excluir Produto Padrão", type="primary"):
-                                    execute_query("DELETE FROM produtos_padrao WHERE id = ?", (produto_excluir,))
+                                    delete_data("produtos_padrao", {"id": produto_excluir})
                                     st.success(f"✅ Produto '{nome_excluir}' excluído!")
                                     st.rerun()
                     else:
@@ -910,7 +1134,7 @@ elif menu == "📝 Nova Fichinha":
                     )
                     
                     if produto_editar:
-                        produto_dados = query_to_dict("SELECT * FROM produtos_padrao WHERE id = ?", (produto_editar,))
+                        produto_dados = query_to_dict_cached("produtos_padrao", filters={"id": produto_editar})
                         
                         if produto_dados:
                             with st.form("form_editar_produto_padrao"):
@@ -937,7 +1161,7 @@ elif menu == "📝 Nova Fichinha":
             st.divider()
             st.subheader("➕ Adicionar Produto à Fichinha")
             
-            produtos_padrao = query_to_list("SELECT id, nome, valor FROM produtos_padrao ORDER BY nome")
+            produtos_padrao = get_all_produtos_padrao()
             
             modo_adicao = st.radio(
                 "Tipo de produto:",
@@ -963,12 +1187,21 @@ elif menu == "📝 Nova Fichinha":
                             st.info(f"📦 Produto: **{nome_produto}** - Valor: {formata_moeda(valor_produto)}")
                             
                             if st.form_submit_button("✅ Adicionar à Fichinha"):
-                                execute_query(
-                                    "INSERT INTO produtos (cliente_id, nome, valor, data_compra, pago) VALUES (?, ?, ?, ?, 0)",
-                                    (cliente_id, nome_produto, valor_produto, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                                )
-                                st.success(f"✅ Produto '{nome_produto}' adicionado!")
-                                st.rerun()
+                                # Verificar limite antes de adicionar
+                                verificacao = verificar_pode_comprar(cliente_id, valor_produto)
+                                if not verificacao['pode']:
+                                    st.error(f"❌ {verificacao['motivo']}")
+                                else:
+                                    produto_data = {
+                                        'cliente_id': cliente_id,
+                                        'nome': nome_produto,
+                                        'valor': valor_produto,
+                                        'data_compra': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        'pago': False
+                                    }
+                                    if insert_data("produtos", produto_data):
+                                        st.success(f"✅ Produto '{nome_produto}' adicionado!")
+                                        st.rerun()
             else:
                 with st.form("form_produto_personalizado", clear_on_submit=True):
                     col1, col2 = st.columns(2)
@@ -990,20 +1223,26 @@ elif menu == "📝 Nova Fichinha":
                         if not nome:
                             st.error("❌ Nome do produto obrigatório")
                         else:
-                            execute_query(
-                                "INSERT INTO produtos (cliente_id, nome, valor, data_compra, pago) VALUES (?, ?, ?, ?, 0)",
-                                (cliente_id, nome, valor, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                            )
-                            st.success(f"✅ Produto '{nome}' adicionado com valor personalizado!")
-                            st.rerun()
+                            # Verificar limite antes de adicionar
+                            verificacao = verificar_pode_comprar(cliente_id, valor)
+                            if not verificacao['pode']:
+                                st.error(f"❌ {verificacao['motivo']}")
+                            else:
+                                produto_data = {
+                                    'cliente_id': cliente_id,
+                                    'nome': nome,
+                                    'valor': valor,
+                                    'data_compra': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    'pago': False
+                                }
+                                if insert_data("produtos", produto_data):
+                                    st.success(f"✅ Produto '{nome}' adicionado com valor personalizado!")
+                                    st.rerun()
             
             st.divider()
             st.subheader("📋 Fichinha Atual")
             
-            produtos = query_to_list(
-                "SELECT id, nome, valor, data_compra FROM produtos WHERE cliente_id = ? AND pago = 0 ORDER BY id DESC",
-                (cliente_id,)
-            )
+            produtos = get_produtos_nao_pagos_cliente(cliente_id)
             
             if produtos:
                 df_produtos = pd.DataFrame(produtos)
@@ -1054,7 +1293,7 @@ elif menu == "📝 Nova Fichinha":
                         
                         if confirmar == nome_produto:
                             if st.button("🗑️ EXCLUIR PRODUTO", type="primary", use_container_width=True):
-                                execute_query("DELETE FROM produtos WHERE id = ?", (produto_id,))
+                                delete_data("produtos", {"id": produto_id})
                                 st.success(f"✅ Produto excluído!")
                                 st.rerun()
                         else:
@@ -1069,7 +1308,7 @@ elif menu == "📝 Nova Fichinha":
 elif menu == "💰 Pagamentos":
     st.title("💰 Pagamentos")
     
-    clientes = query_to_list("SELECT id, nome FROM clientes ORDER BY nome")
+    clientes = get_all_clientes()
     
     if not clientes:
         st.warning("⚠️ Cadastre um cliente primeiro!")
@@ -1087,10 +1326,7 @@ elif menu == "💰 Pagamentos":
             if saldo <= 0:
                 st.success("✅ Cliente não possui débitos!")
             else:
-                produtos = query_to_list(
-                    "SELECT id, nome, valor FROM produtos WHERE cliente_id = ? AND pago = 0 ORDER BY data_compra ASC",
-                    (cliente_id,)
-                )
+                produtos = get_produtos_nao_pagos_cliente(cliente_id)
                 
                 if produtos:
                     df_produtos = pd.DataFrame(produtos)
@@ -1123,41 +1359,41 @@ elif menu == "💰 Pagamentos":
                             if valor > saldo:
                                 st.error(f"❌ Valor excede o débito de {formata_moeda(saldo)}")
                             else:
-                                conn = get_db()
-                                c = conn.cursor()
-                                
                                 valor_restante = valor
                                 for row in produtos:
                                     if valor_restante <= 0:
                                         break
                                     
                                     if row['valor'] <= valor_restante:
-                                        c.execute(
-                                            "UPDATE produtos SET pago = 1, tipo_pagamento = ?, data_pagamento = ? WHERE id = ?",
-                                            (tipo, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id'])
+                                        update_data("produtos", 
+                                            {"pago": True, "tipo_pagamento": tipo, "data_pagamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                                            {"id": row['id']}
                                         )
                                         valor_restante -= row['valor']
                                     else:
                                         resto = row['valor'] - valor_restante
-                                        c.execute(
-                                            "UPDATE produtos SET pago = 1, tipo_pagamento = ?, data_pagamento = ? WHERE id = ?",
-                                            (tipo, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row['id'])
+                                        update_data("produtos",
+                                            {"pago": True, "tipo_pagamento": tipo, "data_pagamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                                            {"id": row['id']}
                                         )
-                                        c.execute(
-                                            "INSERT INTO produtos (cliente_id, nome, valor, data_compra, pago) VALUES (?, ?, ?, ?, 0)",
-                                            (cliente_id, f"{row['nome']} (restante)", round(resto, 2),
-                                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                                        )
+                                        insert_data("produtos", {
+                                            "cliente_id": cliente_id,
+                                            "nome": f"{row['nome']} (restante)",
+                                            "valor": round(resto, 2),
+                                            "data_compra": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            "pago": False
+                                        })
                                         valor_restante = 0
                                 
-                                c.execute(
-                                    "INSERT INTO pagamentos (cliente_id, valor, tipo, data_pagamento, descricao) VALUES (?, ?, ?, ?, ?)",
-                                    (cliente_id, valor, tipo, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), descricao)
-                                )
+                                insert_data("pagamentos", {
+                                    "cliente_id": cliente_id,
+                                    "valor": valor,
+                                    "tipo": tipo,
+                                    "data_pagamento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "descricao": descricao
+                                })
                                 
-                                conn.commit()
                                 novo_saldo = calcula_saldo(cliente_id)
-                                conn.close()
                                 
                                 st.success(f"✅ Pagamento de {formata_moeda(valor)} registrado!")
                                 st.info(f"💰 Novo saldo: {formata_moeda(novo_saldo)}")
@@ -1166,10 +1402,7 @@ elif menu == "💰 Pagamentos":
                                 st.rerun()
             
             st.subheader("📋 Histórico de Pagamentos")
-            historico = query_to_list(
-                "SELECT valor, tipo, data_pagamento, descricao FROM pagamentos WHERE cliente_id = ? ORDER BY id DESC LIMIT 30",
-                (cliente_id,)
-            )
+            historico = get_historico_pagamentos(cliente_id)
             
             if historico:
                 df_historico = pd.DataFrame(historico)
@@ -1177,7 +1410,7 @@ elif menu == "💰 Pagamentos":
                 df_historico['tipo'] = df_historico['tipo'].apply(
                     lambda x: {"dinheiro": "💵", "cartao": "💳", "pix": "📱"}.get(x, x)
                 )
-                st.dataframe(df_historico[['valor_fmt', 'tipo', 'data_pagamento', 'descricao']], use_container_width=True)
+                st.dataframe(df_historico[['valor_fmt', 'tipo', 'data_pagamento', 'descricao']].head(30), use_container_width=True)
 
 # -------------------- RELATÓRIOS --------------------
 elif menu == "📊 Relatórios":
@@ -1186,17 +1419,24 @@ elif menu == "📊 Relatórios":
     tab1, tab2, tab3, tab4 = st.tabs(["📈 Devedores", "🏷️ Produtos Padrão", "📤 Exportar", "🔄 Sincronizar"])
     
     with tab1:
-        devedores = query_to_list("""
-            SELECT c.nome, c.telefone, c.modo_seguro, SUM(p.valor) as total, COUNT(p.id) as qtd
-            FROM clientes c
-            JOIN produtos p ON c.id = p.cliente_id
-            WHERE p.pago = 0
-            GROUP BY c.id
-            ORDER BY total DESC
-        """)
+        devedores = []
+        clientes_all = get_all_clientes()
+        
+        for cliente in clientes_all:
+            produtos_pendentes = get_produtos_nao_pagos_cliente(cliente['id'])
+            if produtos_pendentes:
+                total = sum(float(p.get('valor', 0)) for p in produtos_pendentes)
+                devedores.append({
+                    'nome': cliente['nome'],
+                    'telefone': cliente.get('telefone', ''),
+                    'modo_seguro': cliente.get('modo_seguro', False),
+                    'total': total,
+                    'qtd': len(produtos_pendentes)
+                })
         
         if devedores:
             df = pd.DataFrame(devedores)
+            df = df.sort_values('total', ascending=False)
             df['total_fmt'] = df['total'].apply(formata_moeda)
             df['modo'] = df['modo_seguro'].apply(lambda x: "🔒" if x else "📱")
             st.dataframe(df[['nome', 'telefone', 'modo', 'qtd', 'total_fmt']], use_container_width=True)
@@ -1208,7 +1448,7 @@ elif menu == "📊 Relatórios":
     
     with tab2:
         st.subheader("🏷️ Produtos Padrão Cadastrados")
-        produtos_padrao = query_to_list("SELECT nome, valor, data_cadastro FROM produtos_padrao ORDER BY nome")
+        produtos_padrao = get_all_produtos_padrao()
         
         if produtos_padrao:
             df = pd.DataFrame(produtos_padrao)
@@ -1227,21 +1467,23 @@ elif menu == "📊 Relatórios":
     
     with tab3:
         st.subheader("📤 Exportar Dados")
-        if st.button("Exportar Todos (CSV)"):
-            conn = get_db()
-            c = pd.read_sql_query("SELECT * FROM clientes", conn)
-            p = pd.read_sql_query("SELECT * FROM produtos", conn)
-            pg = pd.read_sql_query("SELECT * FROM pagamentos", conn)
-            pp = pd.read_sql_query("SELECT * FROM produtos_padrao", conn)
-            conn.close()
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button("📥 Clientes", c.to_csv(index=False).encode(), "clientes.csv", "text/csv")
-                st.download_button("📥 Produtos", p.to_csv(index=False).encode(), "produtos.csv", "text/csv")
-            with col2:
-                st.download_button("📥 Pagamentos", pg.to_csv(index=False).encode(), "pagamentos.csv", "text/csv")
-                st.download_button("📥 Produtos Padrão", pp.to_csv(index=False).encode(), "produtos_padrao.csv", "text/csv")
+        
+        clientes_df = pd.DataFrame(get_all_clientes())
+        produtos_df = pd.DataFrame(query_to_list_cached("produtos"))
+        pagamentos_df = pd.DataFrame(query_to_list_cached("pagamentos"))
+        pp_df = pd.DataFrame(get_all_produtos_padrao())
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if not clientes_df.empty:
+                st.download_button("📥 Clientes", clientes_df.to_csv(index=False).encode(), "clientes.csv", "text/csv")
+            if not produtos_df.empty:
+                st.download_button("📥 Produtos", produtos_df.to_csv(index=False).encode(), "produtos.csv", "text/csv")
+        with col2:
+            if not pagamentos_df.empty:
+                st.download_button("📥 Pagamentos", pagamentos_df.to_csv(index=False).encode(), "pagamentos.csv", "text/csv")
+            if not pp_df.empty:
+                st.download_button("📥 Produtos Padrão", pp_df.to_csv(index=False).encode(), "produtos_padrao.csv", "text/csv")
     
     with tab4:
         st.subheader("🔄 Sincronizar com Outra Versão")
@@ -1282,5 +1524,5 @@ elif menu == "📊 Relatórios":
 # RODAPÉ
 # ====================================================================
 st.sidebar.markdown("---")
-st.sidebar.caption("💾 Dados salvos localmente")
+st.sidebar.caption("☁️ Dados salvos no Supabase")
 st.sidebar.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
