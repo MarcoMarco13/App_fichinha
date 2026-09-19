@@ -1,29 +1,7 @@
 """
 ====================================================================
-CONTROLE DE FICHINHA - Versão Segura (arquivo único)
-====================================================================
-TODAS as funções originais mantidas:
-  ✅ Modo Seguro (toggle na sidebar)
-  ✅ Formulário completo de cliente (CPF, RG, endereço, LGPD)
-  ✅ Comprovante HTML de dívida
-  ✅ Sincronização JSON (exportar/importar)
-  ✅ Edição de produto padrão
-  ✅ Controle de limite de crédito
-  ✅ Bloqueio de cliente
-  ✅ Todas as abas de relatórios
-
-CORREÇÕES DE SEGURANÇA APLICADAS:
-  ✅ Credenciais em st.secrets (não no código)
-  ✅ Senhas com hash bcrypt (12 rounds)
-  ✅ Rate limiting no login
-  ✅ Timeout de sessão (60 min)
-  ✅ Timeout de autenticação gerente (30 min)
-  ✅ Auditoria de ações críticas
-  ✅ Mascaramento de CPF na listagem (LGPD)
-  ✅ Sanitização de entrada
-  ✅ Erros não vazam detalhes internos
-  ✅ Confirmação por texto exato em exclusões
-  ✅ Verificação de senha em tempo constante
+CONTROLE DE FICHINHA - Versão Segura Refatorada (Arquivo Único)
++ Integração WhatsApp (wa.me) — envio MANUAL, sem automação
 ====================================================================
 """
 
@@ -35,22 +13,20 @@ import json
 import base64
 import time
 import bcrypt
+import streamlit.components.v1 as components
 from supabase import create_client, Client
+from urllib.parse import quote  # <-- ADICIONADO: para URL-encode da mensagem
 
-# ====================================================================
-# CONFIGURAÇÃO INICIAL
-# ====================================================================
+# Configuração da Página
 st.set_page_config(page_title="Controle de Fichinha", page_icon="📋", layout="wide")
 
-# ====================================================================
-# CONSTANTES DE CACHE
-# ====================================================================
 CACHE_TTL = 60
 CACHE_LONGO = 300
 
 # ====================================================================
-# CONEXÃO SUPABASE (credenciais via st.secrets)
+# =============== CONEXÃO SUPABASE ===================================
 # ====================================================================
+
 @st.cache_resource(ttl=3600)
 def get_supabase() -> Client:
     """Cliente Supabase (singleton) — credenciais via secrets."""
@@ -63,7 +39,7 @@ def _sb() -> Client:
     return get_supabase()
 
 # ====================================================================
-# =============== SEGURANÇA ==========================================
+# =============== SEGURANÇA E SANITIZAÇÃO ============================
 # ====================================================================
 
 def verificar_senha(senha_digitada: str, hash_armazenado: str) -> bool:
@@ -80,8 +56,8 @@ def verificar_senha(senha_digitada: str, hash_armazenado: str) -> bool:
 
 
 def sanitizar_texto(texto: str, max_len: int = 500) -> str:
-    """Remove caracteres de controle e limita tamanho."""
-    if not texto:
+    """Remove caracteres de controlo e limita o tamanho do texto."""
+    if not texto or not isinstance(texto, str):
         return ""
     texto = ''.join(c for c in texto if c.isprintable() or c in '\n\t')
     return texto.strip()[:max_len]
@@ -94,8 +70,71 @@ def validar_telefone(tel: str) -> bool:
     return len(d) in (10, 11)
 
 
+def valida_cpf(cpf: str) -> bool:
+    if not cpf:
+        return False
+    cpf = re.sub(r'[^0-9]', '', cpf)
+    if len(cpf) != 11 or len(set(cpf)) == 1:
+        return False
+    for i in range(9, 11):
+        soma = sum(int(cpf[j]) * (i + 1 - j) for j in range(i))
+        digito = (soma * 10) % 11
+        if digito == 10:
+            digito = 0
+        if int(cpf[i]) != digito:
+            return False
+    return True
+
+
+def formata_cpf(cpf) -> str:
+    """Formata CPF. Aceita None, float/NaN, int ou str (tolerante a dados do Pandas)."""
+    if cpf is None:
+        return "Não informado"
+    try:
+        if isinstance(cpf, float) and pd.isna(cpf):
+            return "Não informado"
+    except Exception:
+        pass
+    cpf_str = str(cpf).strip()
+    if not cpf_str or cpf_str.lower() in ("nan", "none", "null", "<na>"):
+        return "Não informado"
+    if cpf_str.endswith(".0"):
+        cpf_str = cpf_str[:-2]
+    cpf_digits = re.sub(r'[^0-9]', '', cpf_str)
+    if len(cpf_digits) == 11:
+        return f"{cpf_digits[:3]}.{cpf_digits[3:6]}.{cpf_digits[6:9]}-{cpf_digits[9:]}"
+    if not cpf_digits:
+        return "Não informado"
+    return cpf_digits
+
+
+def mascarar_cpf(cpf) -> str:
+    """Mascara CPF para exibição (LGPD). Aceita None, float/NaN, int ou str."""
+    if cpf is None:
+        return "***.***.***-**"
+    try:
+        if isinstance(cpf, float) and pd.isna(cpf):
+            return "***.***.***-**"
+    except Exception:
+        pass
+    cpf_str = str(cpf).strip()
+    if not cpf_str or cpf_str.lower() in ("nan", "none", "null", "<na>"):
+        return "***.***.***-**"
+    if cpf_str.endswith(".0"):
+        cpf_str = cpf_str[:-2]
+    cpf_digits = re.sub(r'[^0-9]', '', cpf_str)
+    if len(cpf_digits) == 11:
+        return f"***.***.{cpf_digits[6:9]}-**"
+    return "***.***.***-**"
+
+def formata_moeda(valor: float) -> str:
+    if valor is None:
+        return "R$ 0,00"
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 class RateLimiter:
-    """Rate limiter em memória por sessão de usuário."""
+    """Rate limiter em memória por sessão de utilizador."""
     def __init__(self, max_tentativas: int, janela_minutos: int):
         self.max_tentativas = max_tentativas
         self.janela_seg = janela_minutos * 60
@@ -125,12 +164,12 @@ class RateLimiter:
     def limpar(self, ident: str) -> None:
         st.session_state.pop(self._key(ident), None)
 
-
 # ====================================================================
 # =============== AUDITORIA ==========================================
 # ====================================================================
+
 def log_auditoria(acao: str, detalhes: dict) -> None:
-    """Registra ação em tabela de auditoria (falha silenciosa)."""
+    """Regista ação na tabela de auditoria (falha silenciosa)."""
     try:
         _sb().table("auditoria").insert({
             "usuario": st.session_state.get('usuario', 'desconhecido'),
@@ -141,29 +180,30 @@ def log_auditoria(acao: str, detalhes: dict) -> None:
     except Exception as e:
         print(f"[AUDIT ERROR] {e}")
 
+# ====================================================================
+# =============== ESTADO DA SESSÃO E AUTENTICAÇÃO ====================
+# ====================================================================
 
-# ====================================================================
-# =============== ESTADO DA SESSÃO ===================================
-# ====================================================================
-defaults = {
-    'form_data': {},
-    'modo_seguro': False,
-    'autenticado': False,
-    'tempo_autenticacao': None,
-    'logado': False,
-    'usuario': None,
-    'role': None,
-    'last_activity': None,
-    'session_timeout': None,
-    'cache_timestamp': None,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+def init_session_state():
+    defaults = {
+        'form_data': {},
+        'modo_seguro': False,
+        'autenticado': False,
+        'tempo_autenticacao': None,
+        'logado': False,
+        'usuario': None,
+        'role': None,
+        'last_activity': None,
+        'session_timeout': None,
+        'cache_timestamp': None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-# ====================================================================
-# =============== AUTENTICAÇÃO PRINCIPAL =============================
-# ====================================================================
+init_session_state()
+
+
 def verificar_login() -> bool:
     """Verifica se a sessão está válida (com timeout)."""
     if not st.session_state.get('logado', False):
@@ -182,7 +222,7 @@ def fazer_login(usuario: str, senha: str):
     """Tenta autenticar. Retorna (sucesso, mensagem)."""
     usuario = (usuario or "").strip().lower()
     if not usuario or not senha:
-        return False, "❌ Informe usuário e senha."
+        return False, "❌ Informe utilizador e senha."
 
     limiter = RateLimiter(
         max_tentativas=st.secrets.get("MAX_TENTATIVAS_LOGIN", 5),
@@ -196,12 +236,11 @@ def fazer_login(usuario: str, senha: str):
     hashes = st.secrets.get("usuarios", {})
     hash_arm = hashes.get(usuario)
 
-    # Verificação sempre executada (evita timing attack)
     senha_ok = verificar_senha(senha, hash_arm) if hash_arm else False
 
     if not senha_ok:
         limiter.registrar(usuario)
-        return False, "❌ Usuário ou senha inválidos."
+        return False, "❌ Utilizador ou senha inválidos."
 
     limiter.limpar(usuario)
     role = "gerente" if usuario in ("admin", "gerente") else "caixa"
@@ -224,10 +263,10 @@ def fazer_logout():
 def tela_login():
     st.title("🔐 Controle de Fichinha")
     st.markdown("---")
-    st.subheader("Faça login para acessar o sistema")
+    st.subheader("Faça login para aceder ao sistema")
 
     with st.form("form_login"):
-        usuario = st.text_input("Usuário", max_chars=50)
+        usuario = st.text_input("Utilizador", max_chars=50)
         senha = st.text_input("Senha", type="password", max_chars=200)
 
         if st.form_submit_button("Entrar", use_container_width=True):
@@ -243,9 +282,6 @@ def tela_login():
     st.caption("🔒 Sistema protegido | Acesso restrito | Tentativas limitadas")
 
 
-# ====================================================================
-# =============== AUTENTICAÇÃO DO GERENTE (ações críticas) ===========
-# ====================================================================
 def autentica(senha: str) -> bool:
     """Autentica gerente para ações críticas."""
     hashes = st.secrets.get("usuarios", {})
@@ -258,13 +294,13 @@ def autentica(senha: str) -> bool:
 
 
 def logout():
-    """Desautentica gerente (mantém login principal)."""
+    """Desautentica gerente (mantém o login principal)."""
     st.session_state.autenticado = False
     st.session_state.tempo_autenticacao = None
 
 
 def esta_autenticado() -> bool:
-    """Verifica se gerente está autenticado (timeout configurável)."""
+    """Verifica se o gerente está autenticado (timeout configurável)."""
     if st.session_state.get('autenticado') and st.session_state.get('tempo_autenticacao'):
         timeout_min = st.secrets.get("GERENTE_TIMEOUT_MINUTOS", 30)
         elapsed = (datetime.now() - st.session_state.tempo_autenticacao).total_seconds()
@@ -274,6 +310,25 @@ def esta_autenticado() -> bool:
         return True
     return False
 
+
+def render_autenticacao_gerente(key_suffix: str = "") -> bool:
+    """Helper reutilizável para autenticação de gerente na interface."""
+    if esta_autenticado():
+        st.success(f"🔓 Autenticado como gerente (Válido por {st.secrets.get('GERENTE_TIMEOUT_MINUTOS', 30)} min)")
+        if st.button("🚪 Desautenticar", key=f"btn_logout_gerente_{key_suffix}"):
+            logout()
+            st.rerun()
+        return True
+
+    with st.expander("🔐 Autenticação de Gerente Requerida", expanded=True):
+        senha = st.text_input("Senha do gerente:", type="password", key=f"senha_gerente_{key_suffix}")
+        if st.button("🔓 Autenticar", key=f"btn_login_gerente_{key_suffix}"):
+            if autentica(senha):
+                st.success("✅ Autenticado com sucesso!")
+                st.rerun()
+            else:
+                st.error("❌ Senha incorreta!")
+    return False
 
 # ====================================================================
 # =============== BANCO DE DADOS =====================================
@@ -297,7 +352,6 @@ def query_to_list_cached(table, columns="*", filters=None, order=None):
             return response.data if response.data else []
         return []
     except Exception as e:
-        # Log interno, sem vazar detalhes ao usuário
         print(f"[DB ERROR] query_to_list({table}): {e}")
         return []
 
@@ -355,10 +409,10 @@ def delete_data(table, filters):
         print(f"[DB ERROR] delete_data({table}): {e}")
         return False
 
+# ====================================================================
+# =============== REGRAS DE NEGÓCIO E CONSULTAS ======================
+# ====================================================================
 
-# ====================================================================
-# FUNÇÕES DE LIMITE DE CRÉDITO
-# ====================================================================
 @st.cache_data(ttl=CACHE_TTL)
 def get_limite_cliente(cliente_id):
     cliente = query_to_dict_cached("clientes", "limite_credito, bloqueado, motivo_bloqueio", {"id": cliente_id})
@@ -395,9 +449,6 @@ def atualizar_limite_cliente(cliente_id, limite, bloqueado=False, motivo_bloquei
     return update_data("clientes", dados, {"id": cliente_id})
 
 
-# ====================================================================
-# FUNÇÕES DE CONSULTA OTIMIZADAS
-# ====================================================================
 @st.cache_data(ttl=CACHE_TTL)
 def get_all_clientes():
     return query_to_list_cached("clientes", order={"column": "nome", "desc": False})
@@ -466,9 +517,6 @@ def get_produtos_padrao_simples():
                                 order={"column": "nome", "desc": False})
 
 
-# ====================================================================
-# FUNÇÕES DE EDIÇÃO
-# ====================================================================
 def editar_cliente(cliente_id, dados_atualizados):
     return update_data("clientes", dados_atualizados, {"id": cliente_id})
 
@@ -477,9 +525,15 @@ def editar_produto_padrao(produto_id, novo_nome):
     return update_data("produtos_padrao", {"nome": novo_nome}, {"id": produto_id})
 
 
+@st.cache_data(ttl=CACHE_TTL)
+def calcula_saldo(cliente_id):
+    saldos = get_saldos_todos_clientes()
+    return saldos.get(cliente_id, 0.0)
+
 # ====================================================================
-# FUNÇÕES DE SINCRONIZAÇÃO
+# =============== JSON IMPORTAR / EXPORTAR (MANTIDO INTACTO) =========
 # ====================================================================
+
 def exportar_dados_json():
     clientes = query_to_list_cached("clientes")
     produtos = query_to_list_cached("produtos")
@@ -621,60 +675,10 @@ def importar_dados_json(json_data):
         st.error(f"❌ Erro geral na importação: {e}")
         return 0
 
-
 # ====================================================================
-# FUNÇÕES DE VALIDAÇÃO E FORMATAÇÃO
+# =============== GERADOR DE COMPROVANTE (HTML) ======================
 # ====================================================================
-def valida_cpf(cpf):
-    if not cpf:
-        return False
-    cpf = re.sub(r'[^0-9]', '', cpf)
-    if len(cpf) != 11 or len(set(cpf)) == 1:
-        return False
-    for i in range(9, 11):
-        soma = sum(int(cpf[j]) * (i + 1 - j) for j in range(i))
-        digito = (soma * 10) % 11
-        if digito == 10:
-            digito = 0
-        if int(cpf[i]) != digito:
-            return False
-    return True
 
-
-def formata_cpf(cpf):
-    if not cpf:
-        return "Não informado"
-    cpf = re.sub(r'[^0-9]', '', cpf)
-    if len(cpf) == 11:
-        return f"{cpf[:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:]}"
-    return cpf
-
-
-def mascarar_cpf(cpf):
-    """Mascara CPF para exibição (LGPD)."""
-    if not cpf:
-        return "***.***.***-**"
-    cpf = re.sub(r'[^0-9]', '', cpf)
-    if len(cpf) == 11:
-        return f"***.***.{cpf[6:9]}-**"
-    return "***.***.***-**"
-
-
-def formata_moeda(valor):
-    if valor is None:
-        return "R$ 0,00"
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-@st.cache_data(ttl=CACHE_TTL)
-def calcula_saldo(cliente_id):
-    saldos = get_saldos_todos_clientes()
-    return saldos.get(cliente_id, 0.0)
-
-
-# ====================================================================
-# FUNÇÃO PARA GERAR COMPROVANTE (HTML)
-# ====================================================================
 def gerar_comprovante_html(cliente_id, produtos):
     cliente = query_to_dict_cached("clientes", filters={"id": cliente_id})
     if not cliente:
@@ -763,26 +767,390 @@ def gerar_comprovante_html(cliente_id, produtos):
     """
     return html
 
+# ====================================================================
+# =============== IMPRESSÃO TÉRMICA — COMPROVANTE DE DÍVIDA ==========
+# ====================================================================
+# Formato compatível com impressoras térmicas 58mm/80mm.
+# O navegador abrirá automaticamente o diálogo de impressão.
+# ====================================================================
+
+def gerar_texto_comprovante_impressao(cliente_id) -> str:
+    """
+    Gera o texto do comprovante no formato exigido para validação
+    em processos criminais (confissão de dívida + assinatura).
+
+    Retorna string pronta para impressão em impressora térmica.
+    """
+    cliente = query_to_dict_cached("clientes", filters={"id": cliente_id})
+    if not cliente:
+        return ""
+
+    produtos = get_produtos_nao_pagos_cliente(cliente_id) or []
+    total = sum(float(p.get('valor', 0)) for p in produtos)
+
+    linhas = []
+    linhas.append("================================")
+    linhas.append("        CAFÉ HAUS               ")
+    linhas.append("================================")
+    linhas.append(f"Data: {datetime.now().strftime('%d/%m/%Y')}")
+    linhas.append(f"Cliente: {cliente.get('nome', '')}")
+    linhas.append(f"CPF: {formata_cpf(cliente.get('cpf'))}")
+    linhas.append("")
+    linhas.append("ITENS DA COMPRA:")
+    linhas.append("")
+    for p in produtos:
+        nome = str(p.get('nome', ''))[:26]
+        valor = formata_moeda(p.get('valor', 0))
+        linhas.append(f"{nome:<26}{valor:>10}")
+    linhas.append("--------------------------------")
+    linhas.append(f"VALOR TOTAL: {formata_moeda(total)}")
+    linhas.append("================================")
+    linhas.append("DECLARAÇÃO DE DÍVIDA:")
+    linhas.append("Reconheço e confesso a dívida")
+    linhas.append("acima descrita, comprometendo-")
+    linhas.append("me a quitá-la até o vencimento")
+    linhas.append("(dia 10 do próximo mês)")
+    linhas.append("")
+    linhas.append("________________________________")
+    linhas.append("       Assinatura do Cliente")
+    linhas.append("================================")
+
+    return "\n".join(linhas)
+
+
+def imprimir_comprovante_cliente(cliente_id, auto_print: bool = True) -> None:
+    """
+    Renderiza o comprovante em HTML e dispara automaticamente o diálogo
+    de impressão do navegador (Ctrl+P) — compatível com impressoras
+    térmicas 58mm e 80mm.
+
+    Se auto_print=False, apenas pré-visualiza sem imprimir.
+    """
+    texto = gerar_texto_comprovante_impressao(cliente_id)
+    if not texto:
+        st.error("❌ Cliente não encontrado para impressão.")
+        return
+
+    texto_escapado = (
+        texto.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+    )
+
+    auto_script = (
+        "<script>window.onload=function(){setTimeout(function(){window.print();},350);};</script>"
+        if auto_print else ""
+    )
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Comprovante de Dívida</title>
+        <style>
+            @page {{ size: 80mm auto; margin: 4mm; }}
+            html, body {{
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 12px;
+                line-height: 1.35;
+                color: #000;
+                background: #fff;
+                margin: 0;
+                padding: 8px;
+            }}
+            pre {{
+                margin: 0;
+                white-space: pre;
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 12px;
+            }}
+            @media print {{
+                body {{ padding: 0; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <pre>{texto_escapado}</pre>
+        {auto_script}
+    </body>
+    </html>
+    """
+
+    components.html(html, height=650, scrolling=True)
+
 
 # ====================================================================
-# FUNÇÃO PARA LIMPAR CACHE MANUALMENTE
+# =============== INTEGRAÇÃO WHATSAPP — ENVIO MANUAL =================
 # ====================================================================
+# Deep link (whatsapp://) → abre o APP diretamente, SEM página
+# intermediária. Fallback wa.me para quando o app não está instalado.
+# NÃO há envio automático: o utilizador revê e envia manualmente.
+# ====================================================================
+
+def formatar_telefone_whatsapp(telefone) -> str:
+    """
+    Normaliza o telefone para o formato aceito pelo wa.me / whatsapp://
+    (padrão E.164 sem o '+'): 55 + DDD + número.
+    """
+    if telefone is None:
+        return ""
+    try:
+        if isinstance(telefone, float) and pd.isna(telefone):
+            return ""
+    except Exception:
+        pass
+
+    tel_str = str(telefone).strip()
+    if not tel_str or tel_str.lower() in ("nan", "none", "null", "<na>"):
+        return ""
+
+    if tel_str.endswith(".0"):
+        tel_str = tel_str[:-2]
+
+    digitos = re.sub(r'[^0-9]', '', tel_str)
+    if not digitos:
+        return ""
+
+    digitos = digitos.lstrip('0')
+    if not digitos:
+        return ""
+
+    if digitos.startswith('55') and len(digitos) in (12, 13):
+        return digitos
+
+    if len(digitos) in (10, 11):
+        return f"55{digitos}"
+
+    if len(digitos) in (12, 13):
+        return f"55{digitos}"
+
+    return digitos
+
+
+def obter_telefone_cliente(cliente: dict) -> str:
+    """Retorna o melhor telefone do cliente (celular > telefone)."""
+    if not cliente:
+        return ""
+    for campo in ('celular', 'telefone'):
+        valor = cliente.get(campo)
+        if valor:
+            formatado = formatar_telefone_whatsapp(valor)
+            if formatado:
+                return formatado
+    return ""
+
+
+def gerar_mensagem_cobranca(nome_cliente: str, valor_total: float) -> str:
+    """Monta a mensagem padrão de cobrança."""
+    nome_limpo = sanitizar_texto(nome_cliente or "", 100).strip() or "cliente"
+    partes = nome_limpo.split()
+    primeiro_nome = partes[0] if partes else nome_limpo
+    valor_fmt = formata_moeda(valor_total)
+
+    return (
+        f"Olá {primeiro_nome}, tudo bem? Estou passando para lembrar que você "
+        f"possui um valor de {valor_fmt} em aberto na sua fichinha. Quando puder "
+        f"dar uma olhada, me avise por aqui! Obrigado."
+    )
+
+
+def gerar_links_whatsapp_cliente(cliente_id) -> tuple:
+    """
+    Gera os links de cobrança para o cliente.
+
+    Retorna (web_direct, deep_link, web_fallback, erro).
+
+    Ordem de prioridade:
+    1. web_direct:  'https://web.whatsapp.com/send?phone=...&text=...'
+       → abre o WhatsApp Web DIRETAMENTE no chat, sem página intermediária.
+    2. deep_link:   'whatsapp://send?phone=...&text=...'
+       → abre o APP instalado (celular ou WhatsApp Desktop).
+    3. web_fallback: 'https://wa.me/...'
+       → fallback universal (mostra página intermediária, mas funciona sempre).
+    """
+    try:
+        if not cliente_id:
+            return "", "", "", "Cliente inválido."
+
+        cliente = query_to_dict_cached("clientes", filters={"id": cliente_id})
+        if not cliente:
+            return "", "", "", "Cliente não encontrado no banco de dados."
+
+        telefone = obter_telefone_cliente(cliente)
+        if not telefone:
+            return "", "", "", "Cliente não possui telefone/celular válido cadastrado."
+
+        saldo = calcula_saldo(cliente_id)
+        if saldo is None or saldo <= 0:
+            return "", "", "", "Cliente não possui saldo em aberto."
+
+        mensagem = gerar_mensagem_cobranca(cliente.get('nome', ''), saldo)
+        msg = quote(mensagem)
+
+        web_direct = f"https://web.whatsapp.com/send?phone={telefone}&text={msg}"
+        deep_link = f"whatsapp://send?phone={telefone}&text={msg}"
+        web_fallback = f"https://wa.me/{telefone}?text={msg}"
+
+        return web_direct, deep_link, web_fallback, ""
+    except Exception as e:
+        print(f"[WHATSAPP ERROR] {e}")
+        return "", "", "", f"Erro ao gerar link: {e}"
+
+
+# Compatibilidade com o nome antigo
+def gerar_link_whatsapp_cliente(cliente_id) -> tuple:
+    """Wrapper de compatibilidade. Retorna (web_direct, erro)."""
+    web_direct, _deep, _web, erro = gerar_links_whatsapp_cliente(cliente_id)
+    return web_direct, erro
+
+
+def _render_link_button_seguro(rotulo: str, link: str,
+                                target: str = "_blank",
+                                cor: str = "#25D366") -> None:
+    """
+    Renderiza um botão-link em HTML puro.
+    Usa target nomeado para reutilizar abas já abertas.
+    """
+    st.markdown(
+        f'<a href="{link}" target="{target}" '
+        f'style="display:block;padding:0.55rem 1rem;background-color:{cor};'
+        f'color:white;text-decoration:none;border-radius:0.5rem;text-align:center;'
+        f'width:100%;font-weight:bold;box-sizing:border-box;">{rotulo}</a>',
+        unsafe_allow_html=True
+    )
+
+
+def _render_botao_aba_nomeada(rotulo: str, link: str,
+                               nome_aba: str = "whatsapp_web_tab",
+                               cor: str = "#25D366",
+                               altura: int = 44) -> None:
+    """
+    Renderiza um botão que abre OU reutiliza uma aba com nome fixo.
+
+    Usa window.open(url, nome_aba). O navegador reutiliza a aba com
+    esse nome a partir da primeira vez que este botão foi clicado —
+    mesmo que o Streamlit recarregue, mude de página, etc.
+
+    Limitação do navegador: NÃO é possível detetar abas abertas
+    manualmente pelo utilizador, por razões de segurança.
+    """
+    link_js = link.replace("\\", "\\\\").replace("'", "\\'")
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"></head>
+    <body style="margin:0;padding:0;background:transparent;">
+      <button
+        onclick="window.open('{link_js}', '{nome_aba}');"
+        style="width:100%;height:{altura - 8}px;padding:0 16px;
+               background:{cor};color:#fff;border:none;border-radius:8px;
+               font-weight:600;
+               font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+               font-size:14px;cursor:pointer;transition:filter 0.15s;"
+        onmouseover="this.style.filter='brightness(0.92)'"
+        onmouseout="this.style.filter='brightness(1)'">
+        {rotulo}
+      </button>
+    </body>
+    </html>
+    """
+    components.html(html, height=altura, scrolling=False)
+
+
+def render_botao_whatsapp(cliente_id, key_suffix: str = "",
+                          rotulo: str = "💬 Enviar cobrança via WhatsApp") -> None:
+    """
+    Renderiza o botão de cobrança via WhatsApp.
+
+    - Botão principal: WhatsApp Web com aba nomeada (reutiliza a mesma
+      aba após o primeiro clique).
+    - Fallback 1: deep link nativo (abre o app instalado).
+    - Fallback 2: wa.me (universal, mas mostra página intermediária).
+    """
+    web_direct, deep_link, web_fallback, erro = gerar_links_whatsapp_cliente(cliente_id)
+
+    if not web_direct:
+        try:
+            st.button(rotulo, disabled=True, use_container_width=True,
+                      key=f"btn_wa_disabled_{key_suffix}")
+        except Exception:
+            st.warning(rotulo)
+        if erro:
+            st.caption(f"⚠️ {erro}")
+        return
+
+    # Prévia da mensagem
+    try:
+        cliente = query_to_dict_cached("clientes", filters={"id": cliente_id})
+        saldo = calcula_saldo(cliente_id)
+        preview = gerar_mensagem_cobranca(cliente.get('nome', ''), saldo)
+        with st.expander("👁️ Ver mensagem que será enviada", expanded=False):
+            st.code(preview, language=None)
+            st.caption(
+                "✏️ Você pode editar livremente a mensagem dentro do WhatsApp "
+                "antes de enviar."
+            )
+    except Exception:
+        pass
+
+    # Botão principal → WhatsApp Web com aba nomeada (reutiliza após 1º clique)
+    _render_botao_aba_nomeada(
+        rotulo,
+        web_direct,
+        nome_aba="whatsapp_web_tab",
+        cor="#25D366"
+    )
+
+    # Alternativas em caso de falha
+    with st.expander("🔄 Alternativas (se o botão acima não funcionar)", expanded=False):
+        st.caption("**Opção 1 — Abrir no aplicativo instalado** (celular ou WhatsApp Desktop):")
+        _render_botao_aba_nomeada(
+            "📱 Abrir no aplicativo WhatsApp",
+            deep_link,
+            nome_aba="whatsapp_app_tab",
+            cor="#128C7E"
+        )
+
+        st.caption("**Opção 2 — Link universal** (mostra página intermediária, mas funciona sempre):")
+        _render_link_button_seguro(
+            "🌐 Abrir via wa.me",
+            web_fallback,
+            target="_blank",
+            cor="#075E54"
+        )
+
+        st.caption(
+            "ℹ️ No **computador**, o botão principal abre o WhatsApp Web diretamente. "
+            "No **celular**, prefira a Opção 1 (abre o app)."
+        )
+
+    st.caption(
+        "💡 **O envio é manual** — sem automação, sem risco de banimento. "
+        "Após o 1º clique, o botão reutiliza a aba do WhatsApp Web."
+    )
+    
+# ====================================================================
+# =============== UTILITÁRIOS FINAIS =================================
+# ====================================================================
+
 def limpar_cache():
     st.cache_data.clear()
     st.cache_resource.clear()
     st.success("✅ Cache limpo com sucesso!")
 
+# ====================================================================
+# =============== VERIFICAÇÃO DE LOGIN PRINCIPAL =====================
+# ====================================================================
 
-# ====================================================================
-# VERIFICAR LOGIN
-# ====================================================================
 if not verificar_login():
     tela_login()
     st.stop()
 
 # ====================================================================
-# SIDEBAR
+# =============== SIDEBAR DE NAVEGAÇÃO ===============================
 # ====================================================================
+
 st.sidebar.title("📋 Fichinha")
 st.sidebar.success(f"👋 Olá, {st.session_state.usuario}!")
 st.sidebar.markdown("---")
@@ -811,10 +1179,11 @@ else:
     st.sidebar.info("📱 Modo Normal")
 
 st.sidebar.markdown("---")
+st.sidebar.caption("☁️ Dados salvos no Supabase")
 st.sidebar.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
 # ====================================================================
-# PÁGINAS
+# =============== PÁGINAS DA APLICAÇÃO ===============================
 # ====================================================================
 
 # -------------------- DASHBOARD --------------------
@@ -950,7 +1319,6 @@ elif menu == "👤 Clientes":
                         st.error("❌ Erro ao cadastrar cliente")
 
     st.subheader("📋 Lista de Clientes")
-
     clientes_com_saldo = get_clientes_com_saldo()
 
     if clientes_com_saldo:
@@ -978,11 +1346,43 @@ elif menu == "👤 Clientes":
             use_container_width=True
         )
 
-        # ========== EDIÇÃO DE CLIENTE ==========
+        # =====================================================
+        # 💬 COBRANÇA VIA WHATSAPP (ENVIO MANUAL) — NOVO
+        # =====================================================
+        st.divider()
+        st.subheader("💬 Cobrança via WhatsApp")
+        st.caption(
+            "Gera a mensagem pronta e abre o WhatsApp. **O envio é manual**"
+        )
+
+        # Apenas clientes com saldo em aberto fazem sentido para cobrança,
+        # mas mantemos todos como fallback para não travar a UI.
+        clientes_para_cobranca = [c for c in clientes_com_saldo if c.get('saldo', 0) > 0]
+
+        if clientes_para_cobranca:
+            cliente_wa = st.selectbox(
+                "Selecione o cliente para cobrança",
+                [c['id'] for c in clientes_para_cobranca],
+                format_func=lambda x: next(
+                    (f"{c['nome']} — {formata_moeda(c.get('saldo', 0))}"
+                     for c in clientes_para_cobranca if c['id'] == x),
+                    str(x)
+                ),
+                key="sel_wa_cobranca_clientes"
+            )
+
+            if cliente_wa:
+                render_botao_whatsapp(
+                    cliente_wa,
+                    key_suffix="clientes",
+                    rotulo="💬 Enviar cobrança pelo WhatsApp"
+                )
+        else:
+            st.info("ℹ️ Nenhum cliente com saldo em aberto no momento.")
+
+        # EDIÇÃO DE CLIENTE
         st.divider()
         st.subheader("✏️ Editar Cliente")
-        st.caption("Edite os dados do cliente sem precisar apagar e recriar")
-
         clientes = get_all_clientes()
 
         cliente_editar = st.selectbox(
@@ -1037,7 +1437,6 @@ elif menu == "👤 Clientes":
 
                         st.divider()
                         st.subheader("💰 Controle de Crédito")
-                        st.caption("Defina um limite de crédito para este cliente")
 
                         col1, col2, col3 = st.columns(3)
                         with col1:
@@ -1045,24 +1444,18 @@ elif menu == "👤 Clientes":
                                 "Limite de Crédito (R$)",
                                 min_value=0.00, max_value=999999.99,
                                 value=float(cliente_dados.get('limite_credito', 999999.99)),
-                                step=50.00, format="%.2f",
-                                help="Valor máximo que o cliente pode dever. 999999.99 = sem limite"
+                                step=50.00, format="%.2f"
                             )
                         with col2:
                             bloqueado_edit = st.checkbox(
                                 "🚫 Bloquear Cliente",
-                                value=cliente_dados.get('bloqueado', False),
-                                help="Impede o cliente de fazer novas compras"
+                                value=cliente_dados.get('bloqueado', False)
                             )
                         with col3:
-                            if bloqueado_edit:
-                                motivo_bloqueio_edit = st.text_input(
-                                    "Motivo do Bloqueio",
-                                    value=cliente_dados.get('motivo_bloqueio', ''),
-                                    placeholder="Ex: Inadimplente, Cheque devolvido..."
-                                )
-                            else:
-                                motivo_bloqueio_edit = ''
+                            motivo_bloqueio_edit = st.text_input(
+                                "Motivo do Bloqueio",
+                                value=cliente_dados.get('motivo_bloqueio', '') if bloqueado_edit else ''
+                            )
 
                         st.warning("⚠️ **IMPORTANTE:** O valor financeiro (saldo, produtos, pagamentos) NÃO pode ser editado para evitar fraudes.")
 
@@ -1101,32 +1494,17 @@ elif menu == "👤 Clientes":
                                 }
 
                                 if editar_cliente(cliente_editar, dados_atualizados):
-                                    log_auditoria("editar_cliente",
-                                                  {"cliente_id": cliente_editar, "campos": list(dados_atualizados.keys())})
+                                    log_auditoria("editar_cliente", {"cliente_id": cliente_editar, "campos": list(dados_atualizados.keys())})
                                     st.success(f"✅ Cliente '{nome_edit}' atualizado com sucesso!")
                                     st.rerun()
                                 else:
                                     st.error("❌ Erro ao atualizar cliente")
 
-        # ========== EXCLUIR CLIENTE ==========
+        # EXCLUIR CLIENTE
         st.divider()
         st.subheader("🗑️ Excluir Cliente")
 
-        if not esta_autenticado():
-            with st.expander("🔐 Autenticar para excluir", expanded=True):
-                senha = st.text_input("Senha do gerente:", type="password")
-                if st.button("Autenticar"):
-                    if autentica(senha):
-                        st.success("✅ Autenticado!")
-                        st.rerun()
-                    else:
-                        st.error("❌ Senha incorreta!")
-        else:
-            st.success(f"🔓 Autenticado - Sessão válida por mais {st.secrets.get('GERENTE_TIMEOUT_MINUTOS', 30)} min")
-            if st.button("🚪 Desautenticar"):
-                logout()
-                st.rerun()
-
+        if render_autenticacao_gerente("excluir_cliente"):
             cliente_id = st.selectbox(
                 "Selecione o cliente para excluir",
                 [c['id'] for c in clientes],
@@ -1141,10 +1519,10 @@ elif menu == "👤 Clientes":
                 if saldo > 0:
                     st.warning(f"⚠️ Cliente tem saldo de {formata_moeda(saldo)} pendente!")
 
-                confirmar = st.text_input(f"Digite o nome '{nome_cliente}' para confirmar:")
+                confirmar = st.text_input(f"Digite o nome '{nome_cliente}' para confirmar:", key="conf_del_cliente")
 
                 if confirmar == nome_cliente:
-                    if st.button("🗑️ EXCLUIR PERMANENTEMENTE", type="primary"):
+                    if st.button("🗑️ EXCLUIR PERMANENTEMENTE", type="primary", key="btn_del_cliente"):
                         log_auditoria("excluir_cliente", {"cliente_id": cliente_id, "nome": nome_cliente})
                         delete_data("pagamentos", {"cliente_id": cliente_id})
                         delete_data("produtos", {"cliente_id": cliente_id})
@@ -1198,8 +1576,6 @@ elif menu == "📝 Nova Fichinha":
                 st.warning("🔒 Cliente em Modo Seguro")
 
             with st.expander("🏷️ Gerenciar Produtos Padrão", expanded=False):
-                st.caption("Cadastre produtos com preços fixos para agilizar o atendimento")
-
                 with st.form("form_produto_padrao", clear_on_submit=True):
                     col1, col2 = st.columns(2)
                     with col1:
@@ -1248,7 +1624,7 @@ elif menu == "📝 Nova Fichinha":
 
                     st.caption("🔒 Para excluir um produto padrão, autentique-se como gerente")
 
-                    if esta_autenticado():
+                    if render_autenticacao_gerente("padrao"):
                         produto_excluir = st.selectbox(
                             "Selecione o produto padrão para excluir",
                             [p['id'] for p in produtos_padrao],
@@ -1263,16 +1639,14 @@ elif menu == "📝 Nova Fichinha":
                                                       key="confirma_padrao")
 
                             if confirmar == nome_excluir:
-                                if st.button("🗑️ Excluir Produto Padrão", type="primary"):
+                                if st.button("🗑️ Excluir Produto Padrão", type="primary", key="btn_del_padrao"):
                                     log_auditoria("excluir_produto_padrao",
                                                   {"id": produto_excluir, "nome": nome_excluir})
                                     delete_data("produtos_padrao", {"id": produto_excluir})
                                     st.success(f"✅ Produto '{nome_excluir}' excluído!")
                                     st.rerun()
-                    else:
-                        st.info("🔐 Autentique-se na seção 'Excluir Cliente' para excluir produtos padrão")
 
-                    # ========== EDIÇÃO DE PRODUTO PADRÃO ==========
+                    # EDIÇÃO DE PRODUTO PADRÃO
                     st.divider()
                     st.subheader("✏️ Editar Produto Padrão")
                     st.caption("⚠️ Apenas o NOME pode ser editado. O VALOR permanece o mesmo para evitar fraudes.")
@@ -1292,12 +1666,9 @@ elif menu == "📝 Nova Fichinha":
                             with st.form("form_editar_produto_padrao"):
                                 col1, col2 = st.columns(2)
                                 with col1:
-                                    nome_edit_padrao = st.text_input("Novo Nome do Produto*",
-                                                                     value=produto_dados['nome'])
+                                    nome_edit_padrao = st.text_input("Novo Nome do Produto*", value=produto_dados['nome'])
                                 with col2:
-                                    st.text_input("Valor (NÃO EDITÁVEL)",
-                                                  value=formata_moeda(produto_dados['valor']),
-                                                  disabled=True)
+                                    st.text_input("Valor (NÃO EDITÁVEL)", value=formata_moeda(produto_dados['valor']), disabled=True)
 
                                 st.warning("🔒 **O valor não pode ser alterado** para manter o histórico financeiro consistente.")
 
@@ -1371,11 +1742,8 @@ elif menu == "📝 Nova Fichinha":
                     with col2:
                         valor = st.number_input(
                             "Valor (R$)*", min_value=0.01,
-                            value=0.01, step=0.01, format="%.2f",
-                            help="Use para promoções ou produtos sem preço fixo"
+                            value=0.01, step=0.01, format="%.2f"
                         )
-
-                    st.caption("✏️ Valor personalizado - ideal para promoções e itens avulsos")
 
                     if st.form_submit_button("✅ Adicionar à Fichinha"):
                         nome_limpo = sanitizar_texto(nome, 200)
@@ -1396,12 +1764,11 @@ elif menu == "📝 Nova Fichinha":
                                 if insert_data("produtos", produto_data):
                                     log_auditoria("add_produto_ficha",
                                                   {"cliente_id": cliente_id, "produto": nome_limpo, "valor": valor})
-                                    st.success(f"✅ Produto '{nome_limpo}' adicionado com valor personalizado!")
+                                    st.success(f"✅ Produto '{nome_limpo}' adicionado!")
                                     st.rerun()
 
             st.divider()
             st.subheader("📋 Fichinha Atual")
-
             produtos = get_produtos_nao_pagos_cliente(cliente_id)
 
             if produtos:
@@ -1410,30 +1777,57 @@ elif menu == "📝 Nova Fichinha":
                 st.dataframe(df_produtos[['nome', 'valor_fmt', 'data_compra']], use_container_width=True)
                 st.metric("💰 Total da Fichinha", formata_moeda(df_produtos['valor'].sum()))
 
+                # =====================================================
+                # 🖨️ IMPRESSÃO DO COMPROVANTE DE DÍVIDA
+                # =====================================================
+                st.divider()
+                st.subheader("🖨️ Imprimir Comprovante de Dívida")
+                st.caption(
+                    "Em casos de pessoas inadimplentes, EXIJA a assinatura do comprovante.(Código Civil, art. 408) "
+                )
+
+                col_imp1, col_imp2 = st.columns([1, 1])
+                with col_imp1:
+                    if st.button("🖨️ IMPRIMIR COMPROVANTE", type="primary",
+                                 use_container_width=True, key="btn_imprimir_ficha"):
+                        log_auditoria("imprimir_comprovante",
+                                      {"cliente_id": cliente_id, "total_produtos": len(produtos)})
+                        st.session_state['_print_cliente_id'] = cliente_id
+                        st.session_state['_print_source'] = 'ficha'
+                with col_imp2:
+                    if st.button("👁️ Pré-visualizar (sem imprimir)",
+                                 use_container_width=True, key="btn_preview_ficha"):
+                        st.session_state['_print_cliente_id'] = cliente_id
+                        st.session_state['_print_source'] = 'preview'
+                        st.session_state['_print_auto'] = False
+
+                # Renderiza a área de impressão quando acionada
+                if st.session_state.get('_print_cliente_id') == cliente_id:
+                    auto = st.session_state.get('_print_source', 'ficha') == 'ficha'
+                    imprimir_comprovante_cliente(cliente_id, auto_print=auto)
+                    if st.button("❌ Fechar área de impressão", key="btn_fechar_print_ficha"):
+                        st.session_state.pop('_print_cliente_id', None)
+                        st.session_state.pop('_print_source', None)
+                        st.rerun()
+
+                # =====================================================
+                # 💬 COBRANÇA VIA WHATSAPP (ENVIO MANUAL) — NOVO
+                # =====================================================
+                st.divider()
+                st.subheader("💬 Cobrança via WhatsApp")
+                st.caption(
+                    "Gera a mensagem pronta e abre o WhatsApp. **O envio é manual**"
+                )
+                render_botao_whatsapp(
+                    cliente_id,
+                    key_suffix="ficha",
+                    rotulo="💬 Enviar cobrança pelo WhatsApp"
+                )
+
                 st.divider()
                 st.subheader("🗑️ Excluir Produto da Fichinha")
-                st.caption("🔒 Requer autenticação do gerente para evitar exclusões acidentais")
 
-                if not esta_autenticado():
-                    with st.expander("🔐 Autentique-se para excluir produtos", expanded=False):
-                        st.info("Digite a senha do gerente para habilitar a exclusão de produtos.")
-                        senha = st.text_input("Senha do gerente:", type="password", key="senha_produto_ficha")
-
-                        if st.button("🔓 Autenticar", use_container_width=True):
-                            if autentica(senha):
-                                st.success("✅ Autenticado com sucesso!")
-                                st.rerun()
-                            else:
-                                st.error("❌ Senha incorreta!")
-                else:
-                    st.success("🔓 Autenticado como gerente")
-
-                    col1, col2 = st.columns([3, 1])
-                    with col2:
-                        if st.button("🚪 Sair", use_container_width=True):
-                            logout()
-                            st.rerun()
-
+                if render_autenticacao_gerente("ficha"):
                     produto_id = st.selectbox(
                         "Selecione o produto para excluir",
                         [p['id'] for p in produtos],
@@ -1450,22 +1844,16 @@ elif menu == "📝 Nova Fichinha":
 
                         confirmar = st.text_input(
                             "Digite o nome do produto para confirmar:",
-                            placeholder="Digite o nome exato do produto",
                             key="conf_del_produto_ficha"
                         )
 
                         if confirmar == nome_produto:
-                            if st.button("🗑️ EXCLUIR PRODUTO", type="primary", use_container_width=True):
+                            if st.button("🗑️ EXCLUIR PRODUTO", type="primary", use_container_width=True, key="btn_del_prod_ficha"):
                                 log_auditoria("excluir_produto_ficha",
                                               {"produto_id": produto_id, "nome": nome_produto})
                                 delete_data("produtos", {"id": produto_id})
                                 st.success("✅ Produto excluído!")
                                 st.rerun()
-                        else:
-                            if confirmar:
-                                st.error("❌ Nome não corresponde!")
-                            else:
-                                st.info("Digite o nome do produto para habilitar a exclusão.")
             else:
                 st.success("✅ Nenhum produto pendente!")
 
@@ -1500,6 +1888,55 @@ elif menu == "💰 Pagamentos":
                     st.subheader("📋 Produtos em Aberto")
                     st.dataframe(df_produtos[['nome', 'valor_fmt']], use_container_width=True)
                     st.metric("💲 Total", formata_moeda(df_produtos['valor'].sum()))
+
+                    # =====================================================
+                    # 🖨️ IMPRESSÃO DO COMPROVANTE DE DÍVIDA
+                    # =====================================================
+                    st.divider()
+                    st.subheader("🖨️ Imprimir Comprovante de Dívida")
+                    st.caption(
+                        "Imprima o comprovante com a declaração de dívida e campo de "
+                        "assinatura para recolher do cliente antes de registrar o pagamento."
+                    )
+
+                    col_imp1, col_imp2 = st.columns([1, 1])
+                    with col_imp1:
+                        if st.button("🖨️ IMPRIMIR COMPROVANTE", type="primary",
+                                     use_container_width=True, key="btn_imprimir_pag"):
+                            log_auditoria("imprimir_comprovante",
+                                          {"cliente_id": cliente_id, "total_produtos": len(produtos),
+                                           "origem": "pagamentos"})
+                            st.session_state['_print_cliente_id'] = cliente_id
+                            st.session_state['_print_source'] = 'ficha'
+                    with col_imp2:
+                        if st.button("👁️ Pré-visualizar (sem imprimir)",
+                                     use_container_width=True, key="btn_preview_pag"):
+                            st.session_state['_print_cliente_id'] = cliente_id
+                            st.session_state['_print_source'] = 'preview'
+
+                    if st.session_state.get('_print_cliente_id') == cliente_id:
+                        auto = st.session_state.get('_print_source', 'ficha') == 'ficha'
+                        imprimir_comprovante_cliente(cliente_id, auto_print=auto)
+                        if st.button("❌ Fechar área de impressão", key="btn_fechar_print_pag"):
+                            st.session_state.pop('_print_cliente_id', None)
+                            st.session_state.pop('_print_source', None)
+                            st.rerun()
+
+                    # =====================================================
+                    # 💬 COBRANÇA VIA WHATSAPP (ENVIO MANUAL) — NOVO
+                    # =====================================================
+                    st.divider()
+                    st.subheader("💬 Cobrança via WhatsApp")
+                    st.caption(
+                        "Gera a mensagem pronta e abre o WhatsApp. **O envio é manual**"
+                    )
+                    render_botao_whatsapp(
+                        cliente_id,
+                        key_suffix="pag",
+                        rotulo="💬 Enviar cobrança pelo WhatsApp"
+                    )
+
+                    st.divider()
 
                     with st.form("form_pagamento"):
                         c1, c2 = st.columns(2)
@@ -1611,6 +2048,32 @@ elif menu == "📊 Relatórios":
 
             st.subheader("📊 Gráfico")
             st.bar_chart(df.set_index('nome')[['total']])
+
+            # =====================================================
+            # 💬 COBRANÇA EM MASSA — SELEÇÃO INDIVIDUAL VIA WHATSAPP
+            # =====================================================
+            st.divider()
+            st.subheader("💬 Cobrança via WhatsApp (Devedores)")
+            st.caption(
+                "Selecione um devedor e gere a mensagem pronta. "
+            )
+
+            devedores_ordenados = sorted(devedores, key=lambda x: x['total'], reverse=True)
+            mapa_nome_id = {c['nome']: c['id'] for c in clientes_all}
+
+            devedor_sel_nome = st.selectbox(
+                "Selecione o devedor",
+                [d['nome'] for d in devedores_ordenados],
+                format_func=lambda n: f"{n} — {formata_moeda(next(d['total'] for d in devedores_ordenados if d['nome'] == n))}",
+                key="sel_wa_devedor"
+            )
+
+            if devedor_sel_nome and devedor_sel_nome in mapa_nome_id:
+                render_botao_whatsapp(
+                    mapa_nome_id[devedor_sel_nome],
+                    key_suffix="relatorio",
+                    rotulo="💬 Enviar cobrança pelo WhatsApp"
+                )
         else:
             st.info("ℹ️ Nenhum devedor!")
 
@@ -1673,16 +2136,7 @@ elif menu == "📊 Relatórios":
         ⚠️ **Importação requer autenticação do gerente** (para evitar importação indevida).
         """)
 
-        if not esta_autenticado():
-            with st.expander("🔐 Autenticar para importar", expanded=True):
-                senha = st.text_input("Senha do gerente:", type="password", key="senha_import")
-                if st.button("🔓 Autenticar", key="btn_import"):
-                    if autentica(senha):
-                        st.success("✅ Autenticado!")
-                        st.rerun()
-                    else:
-                        st.error("❌ Senha incorreta!")
-        else:
+        if render_autenticacao_gerente("sync"):
             col1, col2 = st.columns(2)
 
             with col1:
@@ -1712,10 +2166,3 @@ elif menu == "📊 Relatórios":
                     except Exception as e:
                         print(f"[IMPORT ERROR] {e}")
                         st.error("❌ Erro ao importar arquivo.")
-
-# ====================================================================
-# RODAPÉ
-# ====================================================================
-st.sidebar.markdown("---")
-st.sidebar.caption("☁️ Dados salvos no Supabase")
-st.sidebar.caption(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
