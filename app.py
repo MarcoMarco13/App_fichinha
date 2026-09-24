@@ -4,7 +4,8 @@ CONTROLE DE FICHINHA - Versão Segura Refatorada (Arquivo Único)
 + Integração WhatsApp (wa.me) — envio MANUAL, sem automação
 ====================================================================
 """
-
+import html as html_lib
+import streamlit.components.v1 as components
 import streamlit as st
 import pandas as pd
 from datetime import datetime
