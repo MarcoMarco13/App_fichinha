@@ -1224,6 +1224,70 @@ if menu == "🏠 Dashboard":
 elif menu == "👤 Clientes":
     st.title("👤 Clientes")
 
+    def gerar_termo_lgpd_impressao(cliente_data: dict, nome_estabelecimento: str = "CAFÉ HAUS") -> str:
+        """
+        Gera o texto do Termo de Consentimento e Autorização LGPD
+        formatado para impressora térmica (48 colunas).
+        """
+        import textwrap
+
+        linhas = []
+        linhas.append("================================================")
+        linhas.append(f"{nome_estabelecimento:^48}")
+        linhas.append(" TERMO DE CONSENTIMENTO E AUTORIZAÇÃO (LGPD)   ")
+        linhas.append("================================================")
+        linhas.append(f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        linhas.append(f"Cliente:   {str(cliente_data.get('nome', ''))[:37]}")
+        linhas.append(f"CPF:       {formata_cpf(cliente_data.get('cpf')) if 'formata_cpf' in globals() else cliente_data.get('cpf', '')}")
+        linhas.append(f"RG:        {cliente_data.get('rg', '')}")
+        linhas.append(f"Celular:   {cliente_data.get('celular', cliente_data.get('telefone', ''))}")
+        
+        end = f"{cliente_data.get('logradouro', '')}, {cliente_data.get('numero', '')}"
+        if cliente_data.get('bairro'):
+            end += f" - {cliente_data.get('bairro')}"
+        linhas.append(f"Endereço:  {end[:37]}")
+        linhas.append("------------------------------------------------")
+        
+        texto_termo = (
+            f"Ao assinar este termo, autorizo expressamente que o "
+            f"estabelecimento {nome_estabelecimento} colete e armazene meus "
+            f"dados pessoais acima listados, de forma segura e "
+            f"confidencial, com a finalidade exclusiva de realizar "
+            f"a abertura, manutenção e gestão do meu cadastro de "
+            f"crédito próprio (conta fiada).\n\n"
+            f"ESTOU CIENTE E CONCORDO QUE:\n"
+            f"1. FINALIDADE: Meus dados serão utilizados unicamente "
+            f"para controle de limite de compras, emissão de "
+            f"comprovantes de débito e contatos/cobranças.\n"
+            f"2. PROTEÇÃO AO CRÉDITO: Em caso de inadimplência, "
+            f"autorizo a inclusão dos meus dados e CPF nos órgãos "
+            f"de restrição ao crédito (SPC/SERASA) e protesto em "
+            f"cartório, servindo os cupons de compra como dívida "
+            f"líquida e certa.\n"
+            f"3. SEGURANÇA E DIREITOS: Meus dados não serão "
+            f"vendidos ou compartilhados para publicidade. Posso "
+            f"solicitar a exclusão definitiva a qualquer momento, "
+            f"desde que as pendências financeiras estejam quitadas."
+        )
+        
+        for paragrafo in texto_termo.split("\n"):
+            if paragrafo.strip():
+                linhas.extend(textwrap.wrap(paragrafo, width=48))
+            else:
+                linhas.append("")
+
+        linhas.append("------------------------------------------------")
+        linhas.append("Por ser a expressão da minha vontade, assino:")
+        linhas.append("")
+        linhas.append("")
+        linhas.append("________________________________________________")
+        linhas.append(f"{'Assinatura do Cliente':^48}")
+        linhas.append(f"{'CPF: ' + str(cliente_data.get('cpf', '')):^48}")
+        linhas.append("================================================")
+        linhas.append("")
+
+        return "\n".join(linhas)
+
     with st.expander("➕ Novo Cliente", expanded=False):
         with st.form("form_cliente"):
             nome = st.text_input("Nome*", value=st.session_state.form_data.get('nome', ''))
@@ -1231,35 +1295,35 @@ elif menu == "👤 Clientes":
 
             if st.session_state.modo_seguro:
                 st.divider()
-                st.warning("🔒 Modo Seguro - Dados completos")
+                st.warning("🔒 Modo Seguro - Dados completos e Termo LGPD")
                 c1, c2 = st.columns(2)
                 with c1:
-                    cpf = st.text_input("CPF", max_chars=11, value=st.session_state.form_data.get('cpf', ''))
-                    rg = st.text_input("RG", value=st.session_state.form_data.get('rg', ''))
+                    cpf = st.text_input("CPF*", max_chars=11, value=st.session_state.form_data.get('cpf', ''))
+                    rg = st.text_input("RG*", value=st.session_state.form_data.get('rg', ''))
                     data_nasc = st.date_input("Nascimento", value=st.session_state.form_data.get('data_nasc', None))
                 with c2:
                     email = st.text_input("Email", value=st.session_state.form_data.get('email', ''))
-                    celular = st.text_input("Celular", value=st.session_state.form_data.get('celular', ''))
+                    celular = st.text_input("Celular*", value=st.session_state.form_data.get('celular', ''))
 
                 st.subheader("Endereço")
                 c1, c2, c3 = st.columns([3, 1, 1])
                 with c1:
-                    logradouro = st.text_input("Logradouro", value=st.session_state.form_data.get('logradouro', ''))
+                    logradouro = st.text_input("Logradouro*", value=st.session_state.form_data.get('logradouro', ''))
                 with c2:
-                    numero = st.text_input("Número", value=st.session_state.form_data.get('numero', ''))
+                    numero = st.text_input("Número*", value=st.session_state.form_data.get('numero', ''))
                 with c3:
                     complemento = st.text_input("Complemento", value=st.session_state.form_data.get('complemento', ''))
 
                 c1, c2, c3 = st.columns([2, 2, 1])
                 with c1:
-                    bairro = st.text_input("Bairro", value=st.session_state.form_data.get('bairro', ''))
+                    bairro = st.text_input("Bairro*", value=st.session_state.form_data.get('bairro', ''))
                 with c2:
-                    cidade = st.text_input("Cidade", value=st.session_state.form_data.get('cidade', ''))
+                    cidade = st.text_input("Cidade*", value=st.session_state.form_data.get('cidade', ''))
                 with c3:
-                    estado = st.text_input("UF", max_chars=2, value=st.session_state.form_data.get('estado', ''))
+                    estado = st.text_input("UF*", max_chars=2, value=st.session_state.form_data.get('estado', ''))
 
                 cep = st.text_input("CEP", max_chars=8, value=st.session_state.form_data.get('cep', ''))
-                aceite_lgpd = st.checkbox("Aceito LGPD", value=st.session_state.form_data.get('aceite_lgpd', False))
+                aceite_lgpd = st.checkbox("Aceito o Termo de Consentimento LGPD*", value=st.session_state.form_data.get('aceite_lgpd', False))
                 observacoes = st.text_area("Observações", value=st.session_state.form_data.get('observacoes', ''))
             else:
                 cpf = rg = email = celular = logradouro = numero = complemento = bairro = cidade = estado = cep = observacoes = None
@@ -1277,7 +1341,9 @@ elif menu == "👤 Clientes":
                     erros.append("Telefone obrigatório")
                 if st.session_state.modo_seguro:
                     if not cpf or not valida_cpf(cpf):
-                        erros.append("CPF inválido")
+                        erros.append("CPF inválido ou ausente")
+                    if not rg:
+                        erros.append("RG obrigatório")
                     if not logradouro or not numero or not bairro or not cidade or not estado:
                         erros.append("Endereço completo obrigatório")
                     if not aceite_lgpd:
@@ -1323,10 +1389,27 @@ elif menu == "👤 Clientes":
                     if result:
                         log_auditoria("criar_cliente", {"nome": nome_limpo})
                         st.session_state.form_data = {}
-                        st.success("✅ Cliente cadastrado!")
+                        
+                        # Gera o texto do termo impresso para a impressora térmica
+                        texto_impressao = gerar_termo_lgpd_impressao(cliente_data)
+                        
+                        # Tenta enviar para a impressora via função local se disponível
+                        if 'imprimir_texto_termica' in globals():
+                            imprimir_texto_termica(texto_impressao)
+
+                        st.session_state.termo_lgpd_gerado = texto_impressao
+                        st.success("✅ Cliente cadastrado com sucesso!")
                         st.rerun()
                     else:
                         st.error("❌ Erro ao cadastrar cliente")
+
+    # Exibe o comprovante/termo logo após a geração para conferência e cópia/reimpressão rápida
+    if st.session_state.get('termo_lgpd_gerado'):
+        st.subheader("🖨️ Termo LGPD Gerado para Impressão")
+        st.code(st.session_state.termo_lgpd_gerado, language="text")
+        if st.button("OK / Limpar Impressão"):
+            del st.session_state.termo_lgpd_gerado
+            st.rerun()
 
     st.subheader("📋 Lista de Clientes")
     clientes_com_saldo = get_clientes_com_saldo()
