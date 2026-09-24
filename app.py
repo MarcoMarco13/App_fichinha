@@ -1238,7 +1238,11 @@ elif menu == "👤 Clientes":
         linhas.append("================================================")
         linhas.append(f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
         linhas.append(f"Cliente:   {str(cliente_data.get('nome', ''))[:37]}")
-        linhas.append(f"CPF:       {formata_cpf(cliente_data.get('cpf')) if 'formata_cpf' in globals() else cliente_data.get('cpf', '')}")
+        
+        cpf_val = cliente_data.get('cpf', '')
+        if 'formata_cpf' in globals() and cpf_val:
+            cpf_val = formata_cpf(cpf_val)
+        linhas.append(f"CPF:       {cpf_val}")
         linhas.append(f"RG:        {cliente_data.get('rg', '')}")
         linhas.append(f"Celular:   {cliente_data.get('celular', cliente_data.get('telefone', ''))}")
         
@@ -1287,6 +1291,60 @@ elif menu == "👤 Clientes":
         linhas.append("")
 
         return "\n".join(linhas)
+
+    def imprimir_termo_lgpd_html(cliente_data: dict, auto_print: bool = True) -> None:
+        """
+        Renderiza o termo LGPD em HTML e dispara automaticamente o diálogo
+        de impressão do navegador (Ctrl+P) — compatível com impressoras térmicas.
+        """
+        texto = gerar_termo_lgpd_impressao(cliente_data)
+        if not texto:
+            st.error("❌ Erro ao gerar texto para impressão.")
+            return
+
+        texto_escapado = html_lib.escape(texto)
+
+        auto_script = (
+            "<script>window.onload=function(){setTimeout(function(){window.print();},350);};</script>"
+            if auto_print else ""
+        )
+
+        html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Termo LGPD</title>
+            <style>
+                @page {{ size: 80mm auto; margin: 4mm; }}
+                html, body {{
+                    font-family: 'Courier New', Courier, monospace;
+                    font-size: 12px;
+                    line-height: 1.35;
+                    color: #000;
+                    background: #fff;
+                    margin: 0;
+                    padding: 8px;
+                }}
+                pre {{
+                    margin: 0;
+                    white-space: pre;
+                    font-family: 'Courier New', Courier, monospace;
+                    font-size: 12px;
+                }}
+                @media print {{
+                    body {{ padding: 0; }}
+                }}
+            </style>
+        </head>
+        <body>
+            <pre>{texto_escapado}</pre>
+            {auto_script}
+        </body>
+        </html>
+        """
+
+        components.html(html_code, height=650, scrolling=True)
 
     with st.expander("➕ Novo Cliente", expanded=False):
         with st.form("form_cliente"):
@@ -1389,26 +1447,21 @@ elif menu == "👤 Clientes":
                     if result:
                         log_auditoria("criar_cliente", {"nome": nome_limpo})
                         st.session_state.form_data = {}
-                        
-                        # Gera o texto do termo impresso para a impressora térmica
-                        texto_impressao = gerar_termo_lgpd_impressao(cliente_data)
-                        
-                        # Tenta enviar para a impressora via função local se disponível
-                        if 'imprimir_texto_termica' in globals():
-                            imprimir_texto_termica(texto_impressao)
-
-                        st.session_state.termo_lgpd_gerado = texto_impressao
+                        st.session_state.cliente_recem_cadastrado = cliente_data
                         st.success("✅ Cliente cadastrado com sucesso!")
                         st.rerun()
                     else:
                         st.error("❌ Erro ao cadastrar cliente")
 
-    # Exibe o comprovante/termo logo após a geração para conferência e cópia/reimpressão rápida
-    if st.session_state.get('termo_lgpd_gerado'):
-        st.subheader("🖨️ Termo LGPD Gerado para Impressão")
-        st.code(st.session_state.termo_lgpd_gerado, language="text")
-        if st.button("OK / Limpar Impressão"):
-            del st.session_state.termo_lgpd_gerado
+    # Exibe a caixa de impressão com o script `window.print()` ativo logo após cadastrar
+    if st.session_state.get('cliente_recem_cadastrado'):
+        cliente = st.session_state.cliente_recem_cadastrado
+        st.subheader("🖨️ Impressão do Termo LGPD")
+        
+        imprimir_termo_lgpd_html(cliente, auto_print=True)
+
+        if st.button("Concluir / Fechar Impressão"):
+            del st.session_state.cliente_recem_cadastrado
             st.rerun()
 
     st.subheader("📋 Lista de Clientes")
