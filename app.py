@@ -816,8 +816,10 @@ def gerar_texto_comprovante_impressao(cliente_id) -> str:
     linhas.append("================================")
     linhas.append("________________________________")
     linhas.append("       Assinatura da Testemunha 1")
+    linhas.append("================================")
     linhas.append("________________________________")
     linhas.append("       Assinatura da Testemunha 2")
+    linhas.append("================================")
 
     return "\n".join(linhas)
 
