@@ -796,7 +796,8 @@ def gerar_texto_comprovante_impressao(cliente_id) -> str:
     linhas.append(f"Data: {datetime.now().strftime('%d/%m/%Y')}")
     linhas.append(f"Cliente: {cliente.get('nome', '')}")
     linhas.append(f"CPF: {formata_cpf(cliente.get('cpf'))}")
-    linhas.append("")
+    linhas.append(
+    linhas.append("Cidade: Dona Emma")
     linhas.append("ITENS DA COMPRA:")
     linhas.append("")
     for p in produtos:
@@ -811,8 +812,8 @@ def gerar_texto_comprovante_impressao(cliente_id) -> str:
     linhas.append("acima descrita, comprometendo-")
     linhas.append("me a quitá-la até o vencimento")
     linhas.append("(dia 10 do próximo mês)")
-    linhas.append("Em caso de indimplência, autorizo")
-    linhas.append("a inclusão de meu CPF nos orgãos")
+    linhas.append("Em caso de inadimplência, autorizo")
+    linhas.append("a inclusão de meu CPF nos órgãos")
     linhas.append("de proteção de crédito")
     linhas.append("")
     linhas.append("________________________________")
